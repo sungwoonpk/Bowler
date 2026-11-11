@@ -1,0 +1,13 @@
+# Build output
+/bin/
+/dist/
+*.test
+*.out
+
+# Local data
+*.db
+*.db-wal
+*.db-shm
+.env
+
+.DS_Store
