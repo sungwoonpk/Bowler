@@ -7,6 +7,8 @@ package dispatcher
 
 import (
 	"context"
+	crand "crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -53,7 +55,7 @@ type Config struct {
 
 func (c *Config) setDefaults() {
 	if c.Owner == "" {
-		c.Owner = fmt.Sprintf("dispatcher-%08x", rand.Uint32())
+		c.Owner = newOwner()
 	}
 	if c.Workers <= 0 {
 		c.Workers = 128
@@ -85,6 +87,17 @@ func (c *Config) setDefaults() {
 	if c.Log == nil {
 		c.Log = slog.New(slog.DiscardHandler)
 	}
+}
+
+// newOwner makes a name for a dispatcher. It has to be different for every dispatcher that ever shares a database,
+// across processes and machines, so it comes from the system's secure randomness: 64 bits is enough that two will not
+// collide, which a seeded generator with 32 bits would not guarantee.
+func newOwner() string {
+	var b [8]byte
+	if _, err := crand.Read(b[:]); err != nil {
+		panic("dispatcher: cannot read randomness: " + err.Error())
+	}
+	return "dispatcher-" + hex.EncodeToString(b[:])
 }
 
 // Stats are running totals, for metrics.

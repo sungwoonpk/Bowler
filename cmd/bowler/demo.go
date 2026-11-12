@@ -97,7 +97,7 @@ func startReceiver(kind receiverKind) (*demoReceiver, error) {
 	}
 	r := &demoReceiver{kind: kind, started: time.Now(), tries: map[string]int{}, url: "http://" + ln.Addr().String() + "/hook"}
 	r.srv = &http.Server{Handler: http.HandlerFunc(r.serve), ReadHeaderTimeout: 5 * time.Second}
-	go r.srv.Serve(ln)
+	go func() { _ = r.srv.Serve(ln) }()
 	return r, nil
 }
 
@@ -161,13 +161,13 @@ func runDemo(ctx context.Context, args []string, out io.Writer) error {
 	if err != nil {
 		return err
 	}
-	defer os.RemoveAll(dir)
+	defer func() { _ = os.RemoveAll(dir) }()
 
 	db, err := store.Open(filepath.Join(dir, "demo.db"))
 	if err != nil {
 		return err
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	policy := ssrf.Policy{AllowPrivate: true, AllowHTTP: true} // the receivers are on this machine
 	sender := deliver.New(deliver.Config{SSRF: policy, Timeout: 2 * time.Second, UserAgent: "Bowler/" + version})
@@ -191,11 +191,11 @@ func runDemo(ctx context.Context, args []string, out io.Writer) error {
 		return err
 	}
 	httpServer := &http.Server{Handler: srv.Handler(), ReadHeaderTimeout: 5 * time.Second}
-	go httpServer.Serve(ln)
-	defer httpServer.Shutdown(context.Background())
+	go func() { _ = httpServer.Serve(ln) }()
+	defer func() { _ = httpServer.Shutdown(context.Background()) }()
 	runCtx, stopRun := context.WithCancel(ctx)
 	runDone := make(chan struct{})
-	go func() { disp.Run(runCtx); close(runDone) }()
+	go func() { _ = disp.Run(runCtx); close(runDone) }()
 	defer func() { stopRun(); <-runDone }()
 
 	client := demoClient{base: "http://" + ln.Addr().String(), key: apiKey}
@@ -217,7 +217,7 @@ func runDemo(ctx context.Context, args []string, out io.Writer) error {
 		if err != nil {
 			return err
 		}
-		defer r.srv.Close()
+		defer func() { _ = r.srv.Close() }()
 		ep, code, err := client.call("POST", appPath+"/endpoints", map[string]any{"url": r.url, "description": kind.name, "concurrency": 10})
 		if err != nil || code != http.StatusCreated {
 			return fmt.Errorf("could not create the %s endpoint: %v %v", kind.name, code, err)

@@ -95,7 +95,12 @@ func serve(ctx context.Context, cfg config) error {
 	if err != nil {
 		return err
 	}
-	defer db.Close()
+	defer func() {
+		// Closing writes the last of the journal into the database file, so a failure here is worth knowing about.
+		if err := db.Close(); err != nil {
+			log.Error("closing the database failed", "error", err)
+		}
+	}()
 
 	sender := deliver.New(deliver.Config{SSRF: policy, Timeout: cfg.Timeout, UserAgent: "Bowler/" + version})
 	defer sender.Close()

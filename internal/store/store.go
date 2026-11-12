@@ -67,7 +67,7 @@ func Open(path string) (*Store, error) {
 	db.SetConnMaxIdleTime(5 * time.Minute)
 	s := &Store{db: db}
 	if err := s.migrate(context.Background()); err != nil {
-		db.Close()
+		_ = db.Close() // the migration error is the one worth reporting
 		return nil, err
 	}
 	return s, nil
@@ -204,6 +204,21 @@ func parseCursor(s string) (cursor, bool, error) {
 		return cursor{}, false, ErrBadCursor
 	}
 	return cursor{at: n, id: id}, true, nil
+}
+
+// collect reads every row of a result with scan and always closes the rows, whichever way it ends. Closing by hand in
+// each early return is easy to get wrong, and a forgotten close keeps a connection busy.
+func collect[T any](rows *sql.Rows, scan func(scanner) (T, error)) ([]T, error) {
+	defer rows.Close()
+	var out []T
+	for rows.Next() {
+		v, err := scan(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, v)
+	}
+	return out, rows.Err()
 }
 
 // isUniqueViolation reports whether err is SQLite refusing a duplicate in a unique index.

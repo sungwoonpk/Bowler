@@ -38,26 +38,13 @@ type querier interface {
 	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
 }
 
-func collectDeliveries(rows *sql.Rows) ([]domain.Delivery, error) {
-	defer rows.Close()
-	var out []domain.Delivery
-	for rows.Next() {
-		d, err := scanDelivery(rows)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, d)
-	}
-	return out, rows.Err()
-}
-
 func deliveriesForMessage(ctx context.Context, q querier, appID, messageID string) ([]domain.Delivery, error) {
 	rows, err := q.QueryContext(ctx,
 		"SELECT "+deliveryColumns+" FROM deliveries WHERE app_id = ? AND message_id = ? ORDER BY id", appID, messageID)
 	if err != nil {
 		return nil, err
 	}
-	return collectDeliveries(rows)
+	return collect(rows, scanDelivery)
 }
 
 // ListDeliveriesForMessage returns every delivery of one message.
@@ -100,7 +87,7 @@ func (s *Store) ListDeliveriesForEndpoint(ctx context.Context, appID, endpointID
 	if err != nil {
 		return nil, "", err
 	}
-	out, err := collectDeliveries(rows)
+	out, err := collect(rows, scanDelivery)
 	if err != nil {
 		return nil, "", err
 	}
@@ -229,22 +216,20 @@ func (s *Store) RecoverEndpoint(ctx context.Context, appID, endpointID string, s
 		if err != nil {
 			return err
 		}
-		var missed []string
-		for rows.Next() {
-			var mid, typ string
-			if err := rows.Scan(&mid, &typ); err != nil {
-				rows.Close()
-				return err
-			}
-			if ep.Wants(typ) {
-				missed = append(missed, mid)
-			}
-		}
-		if err := rows.Err(); err != nil {
-			rows.Close()
+		type candidate struct{ id, eventType string }
+		candidates, err := collect(rows, func(r scanner) (candidate, error) {
+			var c candidate
+			return c, r.Scan(&c.id, &c.eventType)
+		})
+		if err != nil {
 			return err
 		}
-		rows.Close()
+		var missed []string
+		for _, c := range candidates {
+			if ep.Wants(c.eventType) {
+				missed = append(missed, c.id)
+			}
+		}
 		for _, mid := range missed {
 			if _, err := tx.ExecContext(ctx,
 				`INSERT INTO deliveries (id, message_id, endpoint_id, app_id, state, next_attempt_at, manual, created_at)

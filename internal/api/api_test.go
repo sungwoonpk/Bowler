@@ -871,3 +871,25 @@ func TestEndpointCreationValidation(t *testing.T) {
 		t.Errorf("an empty list means the endpoint takes no events at all, which is not the same as every event: %d %s", r.status, r.raw)
 	}
 }
+
+// The customer signs over the exact bytes it receives, so the payload must not be reformatted on the way through.
+func TestThePayloadReachesTheReceiverByteForByte(t *testing.T) {
+	h := newHarness(t)
+	app := h.app("a")
+	rc := newReceiver(t)
+	_, secret := h.endpoint(app, rc.srv.URL, nil)
+
+	payload := `{ "z":1,   "a":[1, 2.50 ,3e2],"s":"caf\u00e9 \u2713 \"quoted\"", "n": null,"big":12345678901234567890 }`
+	r := h.do("POST", "/v1/apps/"+app+"/messages", `{"event_type":"x","payload":`+payload+`}`)
+	if r.status != 202 {
+		t.Fatalf("%d %s", r.status, r.raw)
+	}
+	eventually(t, 3*time.Second, "the receiver to be called", func() bool { return rc.count() == 1 })
+	got := rc.last()
+	if string(got.body) != payload {
+		t.Fatalf("the body must be exactly what was sent.\n sent: %s\n got:  %s", payload, got.body)
+	}
+	if err := signature.Verify([]string{secret}, got.id, got.timestamp, got.signature, got.body, time.Now(), 0); err != nil {
+		t.Fatalf("the signature must cover those same bytes: %v", err)
+	}
+}

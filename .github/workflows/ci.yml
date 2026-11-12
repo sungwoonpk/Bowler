@@ -36,6 +36,15 @@ jobs:
         run: |
           go install honnef.co/go/tools/cmd/staticcheck@latest
           staticcheck ./...
+      # An ignored error is how a failed write goes unnoticed. The exclusions are listed, with reasons, in .errcheck-excludes.
+      - name: errcheck
+        run: |
+          go install github.com/kisielk/errcheck@latest
+          errcheck -ignoretests -exclude .errcheck-excludes ./...
+      - name: gosec
+        run: |
+          go install github.com/securego/gosec/v2/cmd/gosec@latest
+          gosec -quiet ./...
       # The race detector catches the kind of bug a queue shared by many goroutines is prone to.
       - name: Tests with the race detector, and coverage of the libraries
         run: go test -race -count=1 -timeout 10m ./... -coverprofile=cover.out -coverpkg=./internal/...,./retry,./signature

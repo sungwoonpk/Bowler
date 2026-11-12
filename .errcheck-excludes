@@ -1,0 +1,10 @@
+// Calls whose error is conventionally ignored: closing something that was only read, and writing output to the user's
+// terminal. Everything else must be handled or discarded on purpose with `_ =`.
+(*database/sql.Rows).Close
+// Rolling back after a commit returns an error by design, and the deferred call is the safety net for every early return.
+(*database/sql.Tx).Rollback
+(io.ReadCloser).Close
+(*net/http.Response).Close
+fmt.Fprint
+fmt.Fprintf
+fmt.Fprintln

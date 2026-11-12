@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"time"
 
@@ -68,20 +69,13 @@ func (s *Store) ClaimDue(ctx context.Context, now time.Time, leaseFor time.Durat
 		if err != nil {
 			return err
 		}
-		var ids []string
-		for rows.Next() {
+		ids, err := collect(rows, func(r scanner) (string, error) {
 			var id string
-			if err := rows.Scan(&id); err != nil {
-				rows.Close()
-				return err
-			}
-			ids = append(ids, id)
-		}
-		if err := rows.Err(); err != nil {
-			rows.Close()
+			return id, r.Scan(&id)
+		})
+		if err != nil {
 			return err
 		}
-		rows.Close()
 		if len(ids) == 0 {
 			return nil
 		}
@@ -95,11 +89,13 @@ func (s *Store) ClaimDue(ctx context.Context, now time.Time, leaseFor time.Durat
 			}
 		}
 
+		// The only thing built into the SQL text is a run of "?" placeholders. Every value is passed as an argument.
 		marks := strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",")
 		args := make([]any, len(ids))
 		for i, id := range ids {
 			args[i] = id
 		}
+		// #nosec G202 -- only "?" placeholders are joined into the text, see above. The ids are bound as arguments.
 		joined, err := tx.QueryContext(ctx, `
 			SELECT d.id, d.message_id, d.endpoint_id, d.app_id, d.state, d.attempt_count, d.next_attempt_at,
 			       d.last_status, d.last_failure, d.created_at, d.finished_at, d.manual,
@@ -124,7 +120,10 @@ func (s *Store) ClaimDue(ctx context.Context, now time.Time, leaseFor time.Durat
 		}
 		return joined.Err()
 	})
-	return claims, err
+	if err != nil {
+		return nil, fmt.Errorf("store: claim due deliveries: %w", err)
+	}
+	return claims, nil
 }
 
 func scanClaim(r scanner) (Claim, error) {
@@ -276,7 +275,7 @@ func (s *Store) Complete(ctx context.Context, c Completion) error {
 		return err
 	})
 	if err != nil {
-		return err
+		return fmt.Errorf("store: complete delivery %s: %w", c.DeliveryID, err)
 	}
 	if lost {
 		return ErrLeaseLost

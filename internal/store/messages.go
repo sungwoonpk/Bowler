@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/sungwoonpk/bowler/internal/domain"
@@ -73,22 +74,16 @@ func (s *Store) CreateMessage(ctx context.Context, n NewMessage, now time.Time) 
 		if err != nil {
 			return err
 		}
+		open, err := collect(rows, scanEndpoint)
+		if err != nil {
+			return err
+		}
 		var targets []domain.Endpoint
-		for rows.Next() {
-			e, err := scanEndpoint(rows)
-			if err != nil {
-				rows.Close()
-				return err
-			}
+		for _, e := range open {
 			if e.Wants(n.EventType) {
 				targets = append(targets, e)
 			}
 		}
-		if err := rows.Err(); err != nil {
-			rows.Close()
-			return err
-		}
-		rows.Close()
 
 		for _, e := range targets {
 			d := domain.Delivery{ID: id.New(id.Delivery), MessageID: msg.ID, EndpointID: e.ID, AppID: n.AppID,
@@ -104,7 +99,10 @@ func (s *Store) CreateMessage(ctx context.Context, n NewMessage, now time.Time) 
 		created = true
 		return nil
 	})
-	return msg, deliveries, created, err
+	if err != nil {
+		return domain.Message{}, nil, false, fmt.Errorf("store: create message: %w", err)
+	}
+	return msg, deliveries, created, nil
 }
 
 // GetMessage returns one message of an app.
