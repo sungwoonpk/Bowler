@@ -1,0 +1,30 @@
+name: CodeQL
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "23 5 * * 1"
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          # The newest patch of Go 1.26, not the exact version in go.mod, and not whatever older patch the runner
+          # image happens to have cached. Both an exact pin and the cached copy once failed the vulnerability scan on
+          # known flaws in the standard library that a later patch had fixed.
+          go-version: "1.26.x"
+          check-latest: true
+      - uses: github/codeql-action/init@v3
+        with:
+          languages: go
+      - uses: github/codeql-action/analyze@v3

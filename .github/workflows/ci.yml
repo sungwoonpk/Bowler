@@ -1,0 +1,160 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# A newer push to the same branch makes the older run pointless.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Format, vet, staticcheck and tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          # The newest patch of Go 1.26, not the exact version in go.mod, and not whatever older patch the runner
+          # image happens to have cached. Both an exact pin and the cached copy once failed the vulnerability scan on
+          # known flaws in the standard library that a later patch had fixed.
+          go-version: "1.26.x"
+          check-latest: true
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "these files need gofmt:"
+            echo "$unformatted"
+            exit 1
+          fi
+      - run: go vet ./...
+      - name: staticcheck
+        run: |
+          go install honnef.co/go/tools/cmd/staticcheck@latest
+          staticcheck ./...
+      # An ignored error is how a failed write goes unnoticed. The exclusions are listed, with reasons, in .errcheck-excludes.
+      - name: errcheck
+        run: |
+          go install github.com/kisielk/errcheck@latest
+          errcheck -ignoretests -exclude .errcheck-excludes ./...
+      - name: gosec
+        run: |
+          go install github.com/securego/gosec/v2/cmd/gosec@latest
+          gosec -quiet ./...
+      # The race detector catches the kind of bug a queue shared by many goroutines is prone to.
+      - name: Tests with the race detector, and coverage of the libraries
+        run: go test -race -count=1 -timeout 10m ./... -coverprofile=cover.out -coverpkg=./internal/...,./retry,./signature
+      - name: Coverage gate
+        run: |
+          total=$(go tool cover -func=cover.out | awk '/^total:/ {gsub("%","",$3); print $3}')
+          echo "coverage of the libraries: ${total}%"
+          awk -v t="$total" 'BEGIN { exit (t >= 85.0 ? 0 : 1) }' || { echo "coverage fell under 85%"; exit 1; }
+
+  vuln:
+    name: Known vulnerabilities
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          # The newest patch of Go 1.26, not the exact version in go.mod, and not whatever older patch the runner
+          # image happens to have cached. Both an exact pin and the cached copy once failed the vulnerability scan on
+          # known flaws in the standard library that a later patch had fixed.
+          go-version: "1.26.x"
+          check-latest: true
+      - run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...
+
+  build:
+    name: Build for ${{ matrix.goos }}/${{ matrix.goarch }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { goos: linux, goarch: amd64 }
+          - { goos: linux, goarch: arm64 }
+          - { goos: darwin, goarch: arm64 }
+          - { goos: windows, goarch: amd64 }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          # The newest patch of Go 1.26, not the exact version in go.mod, and not whatever older patch the runner
+          # image happens to have cached. Both an exact pin and the cached copy once failed the vulnerability scan on
+          # known flaws in the standard library that a later patch had fixed.
+          go-version: "1.26.x"
+          check-latest: true
+      # No C compiler is involved, so every target builds from this one machine.
+      - run: CGO_ENABLED=0 GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} go build -trimpath -o bowler-${{ matrix.goos }}-${{ matrix.goarch }} ./cmd/bowler
+
+  demo:
+    name: The demo shows what it claims
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          # The newest patch of Go 1.26, not the exact version in go.mod, and not whatever older patch the runner
+          # image happens to have cached. Both an exact pin and the cached copy once failed the vulnerability scan on
+          # known flaws in the standard library that a later patch had fixed.
+          go-version: "1.26.x"
+          check-latest: true
+      - run: go build -o bowler ./cmd/bowler
+      - name: Run the demo and read its summary
+        run: |
+          ./bowler demo --once | tee demo.txt
+          grep -E "healthy +delivered 10 of 10" demo.txt
+          grep -E "flaky +delivered 10 of 10" demo.txt
+          grep -E "outage +delivered 10 of 10" demo.txt
+          grep -E "slow +delivered  0 of 10, gave up on 10" demo.txt
+          grep -E "the gone customer has now received 10 of 10" demo.txt
+          grep -E "rejected 0" demo.txt
+
+  docker:
+    name: Container image
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t bowler:ci .
+      - name: The container becomes healthy and answers
+        run: |
+          docker run -d --name bowler -e BOWLER_API_KEY=ci-api-key-0123456789abcdef -p 8082:8080 bowler:ci
+          for i in $(seq 1 30); do
+            status=$(docker inspect --format '{{.State.Health.Status}}' bowler)
+            [ "$status" = "healthy" ] && break
+            sleep 2
+          done
+          echo "health: $status"
+          [ "$status" = "healthy" ]
+          curl -fsS http://127.0.0.1:8082/readyz
+          code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8082/v1/apps)
+          echo "without a key: $code"
+          [ "$code" = "401" ]
+      - name: The container runs as an unprivileged user
+        run: |
+          user=$(docker inspect --format '{{.Config.User}}' bowler)
+          echo "user: $user"
+          [ "$user" = "65532:65532" ]
+      - name: The container stops cleanly when asked
+        run: |
+          docker stop --time 20 bowler
+          code=$(docker inspect --format '{{.State.ExitCode}}' bowler)
+          echo "exit code: $code"
+          [ "$code" = "0" ]
+      - name: Logs on failure
+        if: failure()
+        run: docker logs bowler

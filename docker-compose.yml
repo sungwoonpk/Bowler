@@ -1,0 +1,21 @@
+# Run Bowler with a database that survives restarts.
+#
+#   export BOWLER_API_KEY=$(openssl rand -hex 24)
+#   docker compose up --build
+#
+# The API is then at http://localhost:8080. Every request needs the header "Authorization: Bearer $BOWLER_API_KEY".
+services:
+  bowler:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      BOWLER_API_KEY: ${BOWLER_API_KEY:?set BOWLER_API_KEY to a random string of at least 24 characters}
+    volumes:
+      - bowler-data:/data
+    restart: unless-stopped
+    # Shutting down waits for deliveries in progress, up to the drain time. Give Docker a little longer than that.
+    stop_grace_period: 20s
+
+volumes:
+  bowler-data:
