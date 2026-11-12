@@ -6,6 +6,11 @@ import (
 	"time"
 )
 
+// MaxConcurrency is the most deliveries one endpoint may have in flight at once. The API refuses a larger setting, and the
+// HTTP client keeps this many idle connections per host so that an endpoint working at full concurrency reuses its
+// connections instead of opening and closing one for nearly every request.
+const MaxConcurrency = 20
+
 // App is one of Bowler's customers: a company that sends webhooks to its own customers.
 type App struct {
 	ID        string    `json:"id"`

@@ -98,7 +98,7 @@ func New(cfg Config) *Sender {
 		ResponseHeaderTimeout: cfg.Timeout,
 		ForceAttemptHTTP2:     true,
 		MaxIdleConns:          256,
-		MaxIdleConnsPerHost:   4,
+		MaxIdleConnsPerHost:   domain.MaxConcurrency,
 		IdleConnTimeout:       60 * time.Second,
 	}
 	return &Sender{

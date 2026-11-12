@@ -60,8 +60,8 @@ func (s *Server) createEndpoint(w http.ResponseWriter, r *http.Request) error {
 			types = []string{}
 		}
 	}
-	if in.Concurrency < 0 || in.Concurrency > maxConcurrency {
-		return badRequest("concurrency must be from 1 to " + strconv.Itoa(maxConcurrency))
+	if in.Concurrency < 0 || in.Concurrency > domain.MaxConcurrency {
+		return badRequest("concurrency must be from 1 to " + strconv.Itoa(domain.MaxConcurrency))
 	}
 	secret, err := signature.GenerateSecret()
 	if err != nil {
@@ -158,8 +158,8 @@ func (s *Server) updateEndpoint(w http.ResponseWriter, r *http.Request) error {
 		up.EventTypes = &types
 	}
 	if in.Concurrency != nil {
-		if *in.Concurrency < 1 || *in.Concurrency > maxConcurrency {
-			return badRequest("concurrency must be from 1 to " + strconv.Itoa(maxConcurrency))
+		if *in.Concurrency < 1 || *in.Concurrency > domain.MaxConcurrency {
+			return badRequest("concurrency must be from 1 to " + strconv.Itoa(domain.MaxConcurrency))
 		}
 		up.Concurrency = in.Concurrency
 	}

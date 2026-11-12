@@ -3,9 +3,11 @@ package dispatcher
 import (
 	"context"
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -86,9 +88,19 @@ func BenchmarkQueue(b *testing.B) {
 
 // BenchmarkHTTP sends real signed requests over the loopback interface to a receiver that answers 200.
 func BenchmarkHTTP(b *testing.B) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) }))
+	var connections atomic.Int64
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) }))
+	srv.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+		if state == http.StateNew {
+			connections.Add(1)
+		}
+	}
+	srv.Start()
 	defer srv.Close()
 	sender := deliver.New(deliver.Config{SSRF: ssrf.Policy{AllowPrivate: true}, Timeout: 5 * time.Second})
 	defer sender.Close()
 	runEndToEnd(b, sender, func(int) string { return srv.URL })
+	// How many new connections the receiver had to accept for each thousand deliveries. Reusing connections keeps this
+	// low. A high number means connections are opened and closed for nearly every request.
+	b.ReportMetric(float64(connections.Load())/float64(b.N*fanOut)*1000, "conns/1000-deliveries")
 }

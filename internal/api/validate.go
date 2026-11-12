@@ -20,7 +20,6 @@ var (
 
 const (
 	maxEventTypes      = 50
-	maxConcurrency     = 20
 	maxIdempotencyKey  = 255
 	maxDescriptionRune = 500
 	maxNameRune        = 100
