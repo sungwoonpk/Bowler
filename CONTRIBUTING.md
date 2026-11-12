@@ -2,7 +2,8 @@
 
 ## Set up
 
-Needs Go 1.26 or newer. There is nothing else to install: no C compiler, no database server.
+Needs Go 1.26 or newer. There is nothing else to install: no C compiler, no database server. Use a recent patch release: the
+standard library is part of what ships, and `make vuln` fails on the flaws that older patches have.
 
 ```sh
 git clone https://github.com/sungwoonpk/Bowler.git
