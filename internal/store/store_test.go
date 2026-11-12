@@ -80,8 +80,9 @@ func TestOpenIsRepeatable(t *testing.T) {
 	}
 	var v int
 	s2.db.QueryRow("PRAGMA user_version").Scan(&v)
-	if v != 1 {
-		t.Fatalf("schema version = %d, want 1", v)
+	files, _ := migrationFiles.ReadDir("migrations")
+	if v != len(files) {
+		t.Fatalf("schema version = %d, want %d (one per migration file)", v, len(files))
 	}
 }
 

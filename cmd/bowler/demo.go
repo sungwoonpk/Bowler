@@ -267,8 +267,9 @@ func runDemo(ctx context.Context, args []string, out io.Writer) error {
 
 	header := fmt.Sprintf("  %5s", "time")
 	for _, k := range receiverKinds {
-		header += fmt.Sprintf("  %-18s", k.name)
+		header += fmt.Sprintf("  %-22s", k.name)
 	}
+	header = strings.TrimRight(header, " ")
 	say("%s\n  %s", header, strings.Repeat("-", len(header)-2))
 	doneAt := make([]time.Duration, len(endpoints))
 	lastBody := ""
@@ -297,7 +298,7 @@ settle:
 			if doneAt[i] == 0 && x.pending+x.inflight == 0 {
 				doneAt[i] = time.Since(started)
 			}
-			line += fmt.Sprintf("  %-18s", cell)
+			line += fmt.Sprintf("  %-22s", cell)
 		}
 		if body := line[6:]; body != lastBody {
 			say("%s", line)
