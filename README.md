@@ -1,1 +1,240 @@
 # Bowler
+
+[![CI](https://github.com/sungwoonpk/Bowler/actions/workflows/ci.yml/badge.svg)](https://github.com/sungwoonpk/Bowler/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/sungwoonpk/Bowler/actions/workflows/codeql.yml/badge.svg)](https://github.com/sungwoonpk/Bowler/actions/workflows/codeql.yml)
+
+A webhook delivery service. Your product says "this happened", and Bowler makes sure each of your customers' servers hears about it: it signs the request, retries failures, keeps one slow customer from holding up the others, and records exactly what happened on every attempt. Written in Go. It runs as one static file, with no database server and no C compiler.
+
+![Bowler demo](docs/images/demo.gif)
+
+## Why
+
+Almost every product that has an API ends up sending webhooks, and almost every team builds the sending side too quickly and finds the problems later.
+
+| What goes wrong                                              | What Bowler does                                                                                          |
+| ------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------- |
+| A customer's server is down and the event is lost            | The event is stored before you are told "accepted", and retried for about a day                           |
+| One slow customer fills the workers and everyone waits       | Every endpoint has its own concurrency cap, and one stuck endpoint holds one worker, not all of them      |
+| The same event arrives twice and a customer is charged twice | Every attempt carries the same `webhook-id`, so a receiver can ignore a repeat                            |
+| "Is this really from you?"                                   | Signed as the open [Standard Webhooks](https://www.standardwebhooks.com) specification says, with rotation |
+| A customer says "you never sent it"                          | A history of every attempt: when, the status, how long, and what the receiver answered                    |
+| A customer fixes their server and has missed a day of events | One `recover` call replays failures and sends what arrived while the endpoint was off                     |
+| A user registers `http://169.254.169.254/` as a webhook URL  | Refused when registered, and refused again at connection time, so DNS tricks do not work                  |
+| The sending process is killed in the middle of a send        | Nothing is lost. Work is taken under a lease, and another worker picks it up when the lease runs out      |
+
+## What it does
+
+- **Reliable delivery.** At least once. A message and its deliveries are stored in one transaction before `202`. Retries follow a schedule stretching over about a day, with jitter, and honour `Retry-After`.
+- **Isolation.** An endpoint has a concurrency (1 to 20). The queue takes only as many deliveries from an endpoint as it has free slots, so a backlog behind one slow receiver cannot starve the rest.
+- **Signing.** `webhook-id`, `webhook-timestamp` and `webhook-signature` as the Standard Webhooks specification describes. Rotating a secret sends two signatures for a grace period, so receivers can switch without losing a message.
+- **A public verification package.** `signature` has no dependencies. A Go receiver verifies in one call. Receivers in other languages can use any Standard Webhooks library.
+- **SSRF protection.** https only, no private, loopback or metadata addresses, checked when a URL is registered and again on the address actually dialled. Redirects are not followed and proxies from the environment are ignored.
+- **A clear failure vocabulary.** Every failed attempt says why: `timeout`, `dns`, `connection_refused`, `tls`, `blocked_address`, `redirect`, `http_4xx`, `http_5xx`, `gone`, `rate_limited`.
+- **Replay and recovery.** Replay one delivery, or `recover` an endpoint after its receiver is fixed. Recovery includes messages that arrived while the endpoint was switched off.
+- **Idempotent sending.** An `Idempotency-Key` makes retrying a request whose answer you never got safe.
+- **An API with a description that stays true.** `docs/openapi.json` covers every route and the webhook your customers receive, and a test fails if it drifts from the server.
+- **Operable.** Structured JSON logs with request ids, Prometheus metrics, `/healthz` and `/readyz`, graceful shutdown that hands back unfinished work, and a `healthcheck` command for containers with no shell.
+- **Small.** One static binary of about 16 MB for Linux, macOS and Windows. One SQLite file. The Docker image is distroless and runs as an unprivileged user.
+
+## Try it
+
+Needs Go 1.26 or newer. Nothing else: no accounts, no keys, no network, no cost.
+
+```bash
+git clone https://github.com/sungwoonpk/Bowler.git
+cd Bowler
+make demo
+```
+
+The demo starts the service and five "customers", each a small server on your machine that fails in its own way: one is healthy, one fails the first two tries of every message, one is down for five seconds, one hangs, and one answers `410 Gone`. It sends ten messages to all five and shows what happens, in about fifteen seconds. Every customer's server verifies the signatures the way a real one would. The recording above is a rendering of a real run of that command, with its real timing.
+
+### Run the service
+
+```bash
+export BOWLER_API_KEY=$(openssl rand -hex 24)
+go run ./cmd/bowler serve            # listens on 127.0.0.1:8080
+```
+
+Or with Docker:
+
+```bash
+export BOWLER_API_KEY=$(openssl rand -hex 24)
+docker compose up --build
+```
+
+Create an app, give it an endpoint, and send a message:
+
+```bash
+curl -s localhost:8080/v1/apps -H "authorization: Bearer $BOWLER_API_KEY" -H "content-type: application/json" \
+  -d '{"name": "Acme", "uid": "acme-1"}'
+
+curl -s localhost:8080/v1/apps/acme-1/endpoints -H "authorization: Bearer $BOWLER_API_KEY" -H "content-type: application/json" \
+  -d '{"url": "https://hooks.example.com/bowler", "event_types": ["invoice.paid"]}'
+# the response includes the signing "secret"
+
+curl -s localhost:8080/v1/apps/acme-1/messages -H "authorization: Bearer $BOWLER_API_KEY" -H "content-type: application/json" \
+  -H "Idempotency-Key: invoice-1042" \
+  -d '{"event_type": "invoice.paid", "payload": {"invoice": "in_1042", "amount": 4200}}'
+```
+
+To try it against a server on your own machine, start it with `--allow-private --allow-http`. Those flags exist for development and switch off the protection against calling private addresses, so do not use them in production.
+
+### Settings
+
+| Setting                         | Default               | Meaning                                                                                       |
+| ------------------------------- | --------------------- | --------------------------------------------------------------------------------------------- |
+| `BOWLER_API_KEY` (environment)  | required              | At least 24 characters. Only the environment can set it, a flag would show in the process list |
+| `--addr`, `BOWLER_ADDR`         | `127.0.0.1:8080`      | Where to listen. Use `0.0.0.0:8080` only behind a proxy                                       |
+| `--db`, `BOWLER_DB`             | `bowler.db`           | The SQLite file                                                                               |
+| `--workers`                     | `128`                 | Most deliveries in progress at once                                                           |
+| `--timeout`                     | `15s`                 | How long one attempt may take                                                                 |
+| `--lease`                       | timeout + 45s         | How long work taken by an instance that dies waits for another to take it                     |
+| `--drain`                       | `10s`                 | How long shutdown lets attempts finish                                                        |
+| `--max-payload`                 | `262144`              | Largest message payload, in bytes                                                             |
+| `--log-format`, `--log-level`   | `json`, `info`        | `json` or `text`, and `debug`, `info`, `warn` or `error`                                      |
+| `--allow-private`, `--allow-http` | off                 | Development only. See the warning above                                                       |
+
+## For the customers who receive the webhooks
+
+Each request has three headers, and the body is exactly the payload you sent.
+
+```
+webhook-id:         msg_...            the message id, the same on every attempt
+webhook-timestamp:  1731403200         when this attempt was made
+webhook-signature:  v1,g0hM9Ss...      one or two signatures
+```
+
+A Go receiver verifies in one call. This is the tested example from the `signature` package:
+
+```go
+body, _ := io.ReadAll(r.Body) // read it before parsing: the signature covers these exact bytes
+err := signature.Verify(
+    []string{secret}, // pass the old secret too while one is being rotated
+    r.Header.Get(signature.HeaderID),
+    r.Header.Get(signature.HeaderTimestamp),
+    r.Header.Get(signature.HeaderSignature),
+    body, time.Now(), 0, // 0 means the default tolerance of five minutes
+)
+if err != nil {
+    http.Error(w, "invalid signature", http.StatusBadRequest)
+    return
+}
+// Ignore a webhook-id you have already handled, then do the work.
+```
+
+Answer `2xx` to accept. Anything else is retried, except `410 Gone`, which switches the endpoint off. Because delivery is at least once, **ignore a `webhook-id` you have seen before**.
+
+## What it promises, and what it does not
+
+| It promises                                                                 | It does not promise                                                                                     |
+| --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
+| A message that got `202` is not lost, even if the process is killed         | Exactly once. A crash or a slow answer can cause a repeat, so receivers must ignore a `webhook-id` they know |
+| Every attempt is recorded, with its status, duration and failure reason     | A particular order. A retry can be overtaken by a newer message                                         |
+| One endpoint cannot use more than its concurrency of the workers            | That a receiver is reachable. A receiver on a private network needs the development flag                |
+| Secrets and API keys are never written to the log                           | Encryption of the database. Signing secrets and payloads are stored as they are                         |
+
+## How a delivery flows
+
+```mermaid
+flowchart LR
+  P[Your product] -->|POST message| A{API}
+  A -->|one transaction| D[(SQLite)]
+  D -->|due, free slot| W[Workers]
+  W -->|signed POST| R[Customer's server]
+  R -->|2xx| S[succeeded]
+  R -->|5xx, timeout, 4xx| T[retry with backoff and jitter]
+  T --> D
+  R -->|410 Gone| G[endpoint off, waiting deliveries failed]
+  G -.->|recover| D
+```
+
+## Performance
+
+Measured with `go test ./internal/dispatcher -bench . -benchtime 2000x`, on an Apple M3 Pro, one process, one SQLite file on the local disk. Each message goes to ten endpoints. The numbers cover the whole path: storing the message, taking the work, sending, recording the result.
+
+| What is measured                                         | Result                                            |
+| -------------------------------------------------------- | ------------------------------------------------- |
+| The queue and database alone (a sender that answers at once) | about 5,500 deliveries a second                |
+| Real signed HTTP requests over the loopback interface    | about 4,500 deliveries a second, four runs within 6% of each other |
+| Cost of choosing work, 1,000 to 50,000 deliveries waiting | about 0.2 ms, the same at every size              |
+
+Two problems found by measuring are worth knowing about, because both are the kind that only shows when the service is busy:
+
+- **A backlog made the queue slower.** Choosing work ranked every due delivery, so one claim took 2 ms with 1,000 waiting and 190 ms with 50,000, and a service that fell behind fell further behind. It now reads one endpoint at a time through partial indexes, and a test fails if the cost grows with the backlog.
+- **Half of all requests opened a new connection.** The HTTP client kept four idle connections per host while an endpoint may run twenty deliveries at once. Under load that used up local ports, and throughput swung between 27 and 4,200 deliveries a second. New connections fell from about 500 to about 19 per thousand deliveries.
+
+The ceiling now is SQLite's single writer: every result is its own write. Batching results and moving to a networked database are on the roadmap. These numbers are from one laptop on loopback. They show where the limits are, and are not a promise about your hardware or your customers' servers.
+
+## Quality
+
+```bash
+make check       # format, vet, staticcheck, errcheck, gosec, race tests with coverage, vulnerabilities
+```
+
+- **148 tests** run with the race detector, and the libraries have **91% coverage**. CI fails under 85%.
+- **A test that kills the real program.** It starts `bowler serve` as a separate process, sends twenty messages to a receiver that holds its requests open, waits until deliveries are in flight, kills the process with `kill -9`, starts it again on the same database, and checks that every message reaches the customer.
+- **Concurrency.** Twelve workers share one queue and each delivery is handed out exactly once. Three dispatchers share a queue and nothing is sent twice. A slow endpoint with two hundred deliveries behind it does not delay a healthy one.
+- **Failure handling.** Every status class, timeouts, refused connections, DNS failures, bad certificates, redirects, a reply that never ends, a sender that panics, a lease that is lost, shutdown mid-attempt.
+- **Security.** Every kind of private address, a name that resolves to loopback, `HTTP_PROXY` ignored, the API key never in the log, one app unable to read another's data.
+- **The API.** Strict input checks, pagination, idempotency, errors that do not leak details, and a payload that reaches the receiver byte for byte.
+- **The documentation is tested.** The signing example is compiled and run. The OpenAPI file is compared with the routes the server registers, and these tests were checked by breaking the file on purpose.
+- **CI** runs all of that, plus a scan for known vulnerabilities, CodeQL, builds for Linux, macOS and Windows, the demo with its output checked, and a container that must become healthy, run as an unprivileged user and stop cleanly.
+
+## Repo structure
+
+```
+Bowler/
+├── cmd/bowler/           serve, demo, healthcheck, version
+├── signature/            Sign and Verify, public, no dependencies
+├── retry/                the retry schedule, public, no dependencies
+├── internal/
+│   ├── store/            the database and the queue: leases, fairness, replay, recovery
+│   ├── dispatcher/       runs the queue and shuts down in order
+│   ├── deliver/          one attempt, and a verdict
+│   ├── ssrf/             which addresses may be called
+│   ├── api/              the HTTP interface, one file per resource
+│   ├── domain/           the things Bowler is about
+│   └── id/               identifiers
+├── docs/                 openapi.json, threat model, decision records, images
+├── Dockerfile, docker-compose.yml, Makefile
+└── .github/              CI, CodeQL, Dependabot
+```
+
+## Design decisions
+
+Written down in [docs/decisions](docs/decisions), each with what it costs:
+
+- [0001. Delivery is at least once, and a lease decides who works on a delivery](docs/decisions/0001-at-least-once-with-leases.md)
+- [0002. Webhooks are signed as the Standard Webhooks specification says](docs/decisions/0002-standard-webhooks-signing.md)
+- [0003. Customer URLs are checked when registered and again when a connection is made](docs/decisions/0003-ssrf-at-connection-time.md)
+- [0004. One SQLite file and one static binary](docs/decisions/0004-sqlite-single-binary.md)
+- [0005. One receiver cannot hold up the rest, and a receiver that is fixed can catch up](docs/decisions/0005-isolation-and-recovery.md)
+
+## Security
+
+[docs/threat-model.md](docs/threat-model.md) lists what is protected, from whom, how, and what is **not** covered. [SECURITY.md](SECURITY.md) says how to report a problem and how to deploy safely.
+
+## Limits
+
+An honest list of what this version does not do:
+
+- **One node.** SQLite has one writer and one file. There is no replication, so back the file up.
+- **Signing secrets and payloads are stored unencrypted**, and nothing is deleted automatically. Use an encrypted volume.
+- **One API key, and it can do everything.** There are no per-app keys, roles or audit log.
+- **No TLS and no API rate limit.** Put it behind a proxy.
+- **A receiver on a private network cannot be reached** without the global development flag, which removes the SSRF protection. There is no per-endpoint allow list yet.
+- **At least once, not exactly once, and no ordering guarantee.**
+- **HMAC signatures only.** The specification's asymmetric `v1a` scheme is not implemented.
+- **No interface for your customers.** It is an API. A page where a customer manages their endpoints and reads their delivery log is not built.
+- **Throughput is bounded by one SQLite writer**, measured above on one laptop.
+- **The Docker image is built and checked by CI**, and has not been built by hand on the author's machine.
+- **Demo grade.** It has had no independent security review.
+
+## Roadmap
+
+1. Postgres, and more than one node
+2. Encrypt secrets at rest, and a retention limit for payloads
+3. Per-app keys and an audit log
+4. A page for your customers to manage endpoints and read their delivery log
+5. Batch the writes of results, and rate limits per endpoint
+6. Asymmetric `v1a` signatures, and a per-endpoint allow list for private receivers
