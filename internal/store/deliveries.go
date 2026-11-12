@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/sungwoonpk/bowler/internal/domain"
+	"github.com/sungwoonpk/bowler/internal/id"
 )
 
 const deliveryColumns = `id, message_id, endpoint_id, app_id, state, attempt_count, next_attempt_at,
@@ -188,20 +189,72 @@ func (s *Store) Replay(ctx context.Context, appID, deliveryID string, now time.T
 	return out, err
 }
 
-// RecoverEndpoint switches an endpoint back on, if it was off, and replays every delivery to it that failed at or
-// after since. It is what to do after a receiver has been fixed. It returns how many deliveries were replayed.
+// RecoverEndpoint is what to do after a receiver has been fixed. It switches the endpoint back on, if it was off,
+// and sends it everything it should have received since the given time:
+//
+//   - deliveries that failed at or after since are replayed, and
+//   - messages created at or after since that this endpoint never got a delivery for are created and sent. That
+//     covers the time the endpoint was switched off, when new messages skipped it. Without this, an event that
+//     happened during an outage would be lost to that customer for good.
+//
+// Messages from before the endpoint existed, and messages whose type the endpoint does not subscribe to, are left
+// out. A message that already has a delivery is never given a second one. It returns how many deliveries were
+// replayed or created.
 func (s *Store) RecoverEndpoint(ctx context.Context, appID, endpointID string, since, now time.Time) (int, error) {
+	now = now.UTC().Truncate(time.Millisecond)
 	var replayed int
 	err := s.withTx(ctx, func(tx *sql.Tx) error {
-		res, err := tx.ExecContext(ctx,
-			"UPDATE endpoints SET disabled_at = NULL, disabled_reason = NULL WHERE id = ? AND app_id = ? AND deleted_at IS NULL", endpointID, appID)
+		ep, err := scanEndpoint(tx.QueryRowContext(ctx,
+			"SELECT "+endpointColumns+" FROM endpoints WHERE id = ? AND app_id = ? AND deleted_at IS NULL", endpointID, appID))
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrNotFound
+		}
 		if err != nil {
 			return err
 		}
-		if n, _ := res.RowsAffected(); n == 0 {
-			return ErrNotFound
+		if _, err := tx.ExecContext(ctx, "UPDATE endpoints SET disabled_at = NULL, disabled_reason = NULL WHERE id = ?", ep.ID); err != nil {
+			return err
 		}
-		res, err = tx.ExecContext(ctx,
+
+		// Messages the endpoint missed because it was off.
+		from := since
+		if ep.CreatedAt.After(from) {
+			from = ep.CreatedAt
+		}
+		rows, err := tx.QueryContext(ctx,
+			`SELECT m.id, m.event_type FROM messages m
+			 WHERE m.app_id = ? AND m.created_at >= ?
+			   AND NOT EXISTS (SELECT 1 FROM deliveries d WHERE d.message_id = m.id AND d.endpoint_id = ?)
+			 ORDER BY m.created_at, m.id`, appID, ms(from), ep.ID)
+		if err != nil {
+			return err
+		}
+		var missed []string
+		for rows.Next() {
+			var mid, typ string
+			if err := rows.Scan(&mid, &typ); err != nil {
+				rows.Close()
+				return err
+			}
+			if ep.Wants(typ) {
+				missed = append(missed, mid)
+			}
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return err
+		}
+		rows.Close()
+		for _, mid := range missed {
+			if _, err := tx.ExecContext(ctx,
+				`INSERT INTO deliveries (id, message_id, endpoint_id, app_id, state, next_attempt_at, manual, created_at)
+				 VALUES (?, ?, ?, ?, 'pending', ?, 1, ?)`, id.New(id.Delivery), mid, ep.ID, appID, ms(now), ms(now)); err != nil {
+				return err
+			}
+		}
+		replayed = len(missed)
+
+		res, err := tx.ExecContext(ctx,
 			`UPDATE deliveries SET state = 'pending', attempt_count = 0, next_attempt_at = ?, manual = 1, finished_at = NULL,
 			        lease_until = NULL, lease_owner = NULL
 			 WHERE endpoint_id = ? AND app_id = ? AND state = 'failed' AND finished_at >= ?`,
@@ -210,7 +263,7 @@ func (s *Store) RecoverEndpoint(ctx context.Context, appID, endpointID string, s
 			return err
 		}
 		n, _ := res.RowsAffected()
-		replayed = int(n)
+		replayed += int(n)
 		return nil
 	})
 	return replayed, err

@@ -707,3 +707,104 @@ func TestAnAttemptWithoutATriggerIsStillRecorded(t *testing.T) {
 		t.Fatalf("state = %s", d.State)
 	}
 }
+
+func TestPermanentFailureFinishesTheOtherWaitingDeliveries(t *testing.T) {
+	w := newWorld(t)
+	e := w.endpoint(t, "https://a.example/hook", nil, 1)
+	var ds []domain.Delivery
+	for range 4 {
+		_, d := w.send(t, "x", t0)
+		ds = append(ds, d...)
+	}
+	// One delivery is tried and the receiver says it is gone for good.
+	claimed, _ := w.s.ClaimDue(ctx(), t0, time.Minute, "w", 1)
+	err := w.s.Complete(ctx(), Completion{DeliveryID: claimed[0].Delivery.ID, Owner: "w", Result: ResultFailed, Now: t0, DisableEndpoint: "gone",
+		Attempt: domain.Attempt{StartedAt: t0, StatusCode: 410, Failure: domain.FailGone, Trigger: domain.Scheduled}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	counts, _ := w.s.CountByState(ctx())
+	if counts[domain.Failed] != 4 || counts[domain.Pending] != 0 {
+		t.Fatalf("all four should be finished as failed, none left waiting: %v", counts)
+	}
+	for _, d := range ds {
+		got, _ := w.s.GetDelivery(ctx(), w.app.ID, d.ID)
+		if got.ID != claimed[0].Delivery.ID && got.LastFailure != string(domain.FailEndpointDisabled) {
+			t.Fatalf("a delivery finished because its endpoint was disabled says so: %+v", got)
+		}
+	}
+	// Once the receiver is fixed, one call brings them all back.
+	n, err := w.s.RecoverEndpoint(ctx(), w.app.ID, e.ID, t0.Add(-time.Hour), t0.Add(time.Minute))
+	if err != nil || n != 4 {
+		t.Fatalf("recover should replay all four, got %d %v", n, err)
+	}
+}
+
+func TestSwitchingAnEndpointOffByHandIsAPauseNotAFailure(t *testing.T) {
+	w := newWorld(t)
+	e := w.endpoint(t, "https://a.example/hook", nil, 1)
+	w.send(t, "x", t0)
+	off := true
+	w.s.UpdateEndpoint(ctx(), w.app.ID, e.ID, EndpointUpdate{Disabled: &off}, t0)
+	counts, _ := w.s.CountByState(ctx())
+	if counts[domain.Pending] != 1 || counts[domain.Failed] != 0 {
+		t.Fatalf("a paused endpoint keeps its waiting deliveries: %v", counts)
+	}
+}
+
+func TestRecoverAlsoSendsWhatWasMissedWhileTheEndpointWasOff(t *testing.T) {
+	w := newWorld(t)
+	// An old message from before this endpoint existed must never be sent to it.
+	w.send(t, "before.endpoint", t0.Add(-time.Hour))
+	e := w.endpoint(t, "https://a.example/hook", []string{"invoice.paid", "invoice.refunded"}, 1)
+
+	// The endpoint is switched off for good, as after a 410. Messages arriving now skip it.
+	off := true
+	w.s.UpdateEndpoint(ctx(), w.app.ID, e.ID, EndpointUpdate{Disabled: &off}, t0)
+	_, skipped := w.send(t, "invoice.paid", t0.Add(time.Minute))
+	w.send(t, "invoice.refunded", t0.Add(2*time.Minute))
+	w.send(t, "something.else", t0.Add(3*time.Minute)) // not a type this endpoint subscribes to
+	if len(skipped) != 0 {
+		t.Fatalf("a disabled endpoint gets no new deliveries: %v", skipped)
+	}
+
+	n, err := w.s.RecoverEndpoint(ctx(), w.app.ID, e.ID, t0, t0.Add(time.Hour))
+	if err != nil || n != 2 {
+		t.Fatalf("the two subscribed messages it missed should be created, got %d %v", n, err)
+	}
+	ds, _, _ := w.s.ListDeliveriesForEndpoint(ctx(), w.app.ID, e.ID, domain.Pending, Page{})
+	if len(ds) != 2 {
+		t.Fatalf("expected two pending deliveries, got %d", len(ds))
+	}
+	claims, _ := w.s.ClaimDue(ctx(), t0.Add(time.Hour), time.Minute, "w", 10)
+	if len(claims) != 1 {
+		t.Fatalf("a concurrency of 1 hands out one at a time, got %d", len(claims))
+	}
+	if !claims[0].Manual {
+		t.Fatal("recovered deliveries are manual attempts")
+	}
+
+	// Recovering again must not make a second delivery for the same messages.
+	again, err := w.s.RecoverEndpoint(ctx(), w.app.ID, e.ID, t0, t0.Add(2*time.Hour))
+	if err != nil || again != 0 {
+		t.Fatalf("nothing is missing the second time, got %d %v", again, err)
+	}
+	var total int
+	w.s.db.QueryRow("SELECT COUNT(*) FROM deliveries").Scan(&total)
+	if total != 2 {
+		t.Fatalf("there must be exactly two deliveries, found %d", total)
+	}
+}
+
+func TestRecoverRespectsTheCutoffForMissedMessages(t *testing.T) {
+	w := newWorld(t)
+	e := w.endpoint(t, "https://a.example/hook", nil, 1)
+	off := true
+	w.s.UpdateEndpoint(ctx(), w.app.ID, e.ID, EndpointUpdate{Disabled: &off}, t0)
+	w.send(t, "x", t0.Add(time.Hour))
+	w.send(t, "x", t0.Add(5*time.Hour))
+	n, _ := w.s.RecoverEndpoint(ctx(), w.app.ID, e.ID, t0.Add(3*time.Hour), t0.Add(6*time.Hour))
+	if n != 1 {
+		t.Fatalf("only the message after the cutoff is recovered, got %d", n)
+	}
+}

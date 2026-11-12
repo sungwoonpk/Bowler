@@ -258,10 +258,20 @@ func (s *Store) Complete(ctx context.Context, c Completion) error {
 			return nil
 		}
 		if c.DisableEndpoint != "" {
-			_, err = tx.ExecContext(ctx,
+			if _, err = tx.ExecContext(ctx,
 				`UPDATE endpoints SET disabled_at = ?, disabled_reason = ?
 				 WHERE id = (SELECT endpoint_id FROM deliveries WHERE id = ?) AND disabled_at IS NULL`,
-				ms(now), c.DisableEndpoint, c.DeliveryID)
+				ms(now), c.DisableEndpoint, c.DeliveryID); err != nil {
+				return err
+			}
+			// The endpoint was switched off because the receiver refused for good, so the deliveries still waiting for
+			// it are finished too, as failed. Left pending they would never end and never show up as something to
+			// recover. RecoverEndpoint replays them once the receiver is fixed. An endpoint a person switched off by
+			// hand is different: that is a pause, and its deliveries wait.
+			_, err = tx.ExecContext(ctx,
+				`UPDATE deliveries SET state = 'failed', finished_at = ?, last_failure = ?, lease_until = NULL, lease_owner = NULL, manual = 0
+				 WHERE endpoint_id = (SELECT endpoint_id FROM deliveries WHERE id = ?) AND state = 'pending'`,
+				ms(now), string(domain.FailEndpointDisabled), c.DeliveryID)
 		}
 		return err
 	})

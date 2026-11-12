@@ -629,10 +629,15 @@ func TestGoneSwitchesTheEndpointOffAndRecoverBringsItBack(t *testing.T) {
 
 	rc.set(200, 0)
 	rec := h.do("POST", "/v1/apps/"+app+"/endpoints/"+ep+"/recover", map[string]any{"since": time.Now().Add(-time.Hour).Format(time.RFC3339)})
-	if rec.status != 200 || rec.body["replayed"] != float64(1) {
-		t.Fatalf("%d %s", rec.status, rec.raw)
+	if rec.status != 200 || rec.body["replayed"] != float64(2) {
+		t.Fatalf("one failed delivery replayed and one missed message sent, so two: %d %s", rec.status, rec.raw)
 	}
 	eventually(t, 3*time.Second, "the failed delivery to go through", func() bool { return h.deliveryState(app, delivery) == "succeeded" })
+	eventually(t, 3*time.Second, "the message sent while the endpoint was off to arrive too", func() bool {
+		r := h.do("GET", "/v1/apps/"+app+"/endpoints/"+ep+"/deliveries?state=succeeded", nil)
+		data, _ := r.body["data"].([]any)
+		return len(data) == 2
+	})
 	if h.do("GET", "/v1/apps/"+app+"/endpoints/"+ep, nil).body["disabled_at"] != nil {
 		t.Fatal("recovering switches the endpoint back on")
 	}

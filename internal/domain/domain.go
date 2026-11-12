@@ -132,6 +132,8 @@ const (
 	FailGone         Failure = "gone"            // 410, the receiver says this endpoint no longer exists
 	FailRateLimited  Failure = "rate_limited"    // 429
 	FailBodyTooLarge Failure = "response_too_large"
+	// FailEndpointDisabled marks deliveries that were waiting when their endpoint was switched off for good.
+	FailEndpointDisabled Failure = "endpoint_disabled"
 )
 
 // Attempt is one try at a delivery, kept so a customer can see what happened.
