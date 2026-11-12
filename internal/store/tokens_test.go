@@ -199,3 +199,38 @@ func TestPurgeAuditGoesOldestFirstInBatches(t *testing.T) {
 		t.Fatalf("the oldest four go first: %d left, oldest %v", len(left), left[len(left)-1].At)
 	}
 }
+
+// Two actions in the same millisecond have the same time and random ids. The log must still come out in the order they
+// happened, and paging through it must not skip or repeat an entry.
+func TestAuditEntriesFromTheSameMomentKeepTheirOrder(t *testing.T) {
+	w := newWorld(t)
+	for i := range 30 {
+		_, err := w.s.RecordAudit(ctx(), domain.AuditEntry{ActorKind: domain.ActorAdmin, ActorID: "admin", Action: "a" + strconv.Itoa(i)}, t0)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	var seen []string
+	cur := ""
+	for {
+		page, next, err := w.s.ListAudit(ctx(), AuditFilter{}, Page{Limit: 7, Cursor: cur})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, e := range page {
+			seen = append(seen, e.Action)
+		}
+		if next == "" {
+			break
+		}
+		cur = next
+	}
+	if len(seen) != 30 {
+		t.Fatalf("paging must return every entry once, got %d", len(seen))
+	}
+	for i, a := range seen {
+		if want := "a" + strconv.Itoa(29-i); a != want {
+			t.Fatalf("entry %d is %s, want %s: the newest comes first, in the order written", i, a, want)
+		}
+	}
+}

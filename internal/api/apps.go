@@ -32,6 +32,7 @@ func (s *Server) createApp(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
+	s.audit(w, r, app.ID, "app.create", "app", app.ID, nil)
 	writeJSON(w, http.StatusCreated, app)
 	return nil
 }
@@ -55,7 +56,16 @@ func (s *Server) app(r *http.Request) (domain.App, error) {
 	if ref == "" || len(ref) > 100 {
 		return domain.App{}, errNotFound
 	}
-	return s.store.ResolveApp(r.Context(), ref)
+	app, err := s.store.ResolveApp(r.Context(), ref)
+	if err != nil {
+		return domain.App{}, err
+	}
+	// A token is for one app. Another app looks exactly like one that does not exist, so a token cannot be used to find
+	// out which apps there are.
+	if p := callerOf(r); !p.admin && p.appID != app.ID {
+		return domain.App{}, errNotFound
+	}
+	return app, nil
 }
 
 func (s *Server) getApp(w http.ResponseWriter, r *http.Request) error {

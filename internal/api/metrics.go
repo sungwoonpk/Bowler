@@ -48,6 +48,8 @@ func (s *Server) metrics(w http.ResponseWriter, r *http.Request) error {
 		b.WriteString("# HELP bowler_retention_errors_total Retention sweeps that failed.\n# TYPE bowler_retention_errors_total counter\n")
 		fmt.Fprintf(&b, "bowler_retention_errors_total %d\n", st.Errors)
 	}
+	b.WriteString("# HELP bowler_audit_errors_total Audit entries that could not be recorded.\n# TYPE bowler_audit_errors_total counter\n")
+	fmt.Fprintf(&b, "bowler_audit_errors_total %d\n", s.auditErrors.Load())
 	b.WriteString("# HELP bowler_build_info The running version.\n# TYPE bowler_build_info gauge\n")
 	fmt.Fprintf(&b, "bowler_build_info{version=%q} 1\n", s.version)
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4")

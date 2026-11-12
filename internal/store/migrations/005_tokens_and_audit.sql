@@ -14,8 +14,12 @@ CREATE INDEX app_tokens_by_app ON app_tokens (app_id, created_at DESC, id DESC);
 
 -- Who did what. Entries are never updated. app_id has no foreign key on purpose: the record of an action outlives
 -- anything that happens to the thing it was about.
+--
+-- seq numbers the entries in the order they were written, and the log is read in that order. The time alone cannot do it:
+-- two actions in the same millisecond have the same time, and their ids are random.
 CREATE TABLE audit_log (
-    id            TEXT PRIMARY KEY,
+    seq           INTEGER PRIMARY KEY AUTOINCREMENT,
+    id            TEXT NOT NULL UNIQUE,
     at            INTEGER NOT NULL,
     actor_kind    TEXT NOT NULL CHECK (actor_kind IN ('admin', 'app_token')),
     actor_id      TEXT NOT NULL,                 -- 'admin', or the id of the token
@@ -26,5 +30,5 @@ CREATE TABLE audit_log (
     detail        TEXT,                          -- a small JSON object, never a secret or a payload
     request_id    TEXT
 );
-CREATE INDEX audit_by_app ON audit_log (app_id, at DESC, id DESC);
-CREATE INDEX audit_by_time ON audit_log (at DESC, id DESC);
+CREATE INDEX audit_by_app ON audit_log (app_id, seq DESC);
+CREATE INDEX audit_by_time ON audit_log (at);

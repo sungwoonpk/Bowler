@@ -11,16 +11,22 @@ import (
 	"github.com/sungwoonpk/bowler/internal/id"
 )
 
-const auditColumns = "id, at, actor_kind, actor_id, app_id, action, resource_kind, resource_id, detail, request_id"
+const auditColumns = "seq, id, at, actor_kind, actor_id, app_id, action, resource_kind, resource_id, detail, request_id"
 
-func scanAudit(r scanner) (domain.AuditEntry, error) {
+// auditRow is an entry with its place in the log, which the API does not show but the paging needs.
+type auditRow struct {
+	domain.AuditEntry
+	seq int64
+}
+
+func scanAudit(r scanner) (auditRow, error) {
 	var (
-		e                                      domain.AuditEntry
+		e                                      auditRow
 		at                                     int64
 		appID, resKind, resID, detail, request sql.NullString
 	)
-	if err := r.Scan(&e.ID, &at, &e.ActorKind, &e.ActorID, &appID, &e.Action, &resKind, &resID, &detail, &request); err != nil {
-		return domain.AuditEntry{}, err
+	if err := r.Scan(&e.seq, &e.ID, &at, &e.ActorKind, &e.ActorID, &appID, &e.Action, &resKind, &resID, &detail, &request); err != nil {
+		return auditRow{}, err
 	}
 	e.At = fromMS(at)
 	e.AppID, e.ResourceKind, e.ResourceID, e.RequestID = appID.String, resKind.String, resID.String, request.String
@@ -40,7 +46,8 @@ func (s *Store) RecordAudit(ctx context.Context, e domain.AuditEntry, now time.T
 		detail = sql.NullString{String: string(e.Detail), Valid: true}
 	}
 	err := s.withTx(ctx, func(tx *sql.Tx) error {
-		_, err := tx.ExecContext(ctx, "INSERT INTO audit_log ("+auditColumns+") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+		_, err := tx.ExecContext(ctx, `INSERT INTO audit_log (id, at, actor_kind, actor_id, app_id, action, resource_kind, resource_id, detail, request_id)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			e.ID, ms(e.At), e.ActorKind, e.ActorID, nul(e.AppID), e.Action, nul(e.ResourceKind), nul(e.ResourceID), detail, nul(e.RequestID))
 		return err
 	})
@@ -73,24 +80,28 @@ func (s *Store) ListAudit(ctx context.Context, f AuditFilter, p Page) ([]domain.
 		args = append(args, f.Action)
 	}
 	if has {
-		query += " AND (at < ? OR (at = ? AND id < ?))"
-		args = append(args, cur.at, cur.at, cur.id)
+		query += " AND seq < ?" // the cursor's number is the position of the last entry of the previous page
+		args = append(args, cur.at)
 	}
-	query += " ORDER BY at DESC, id DESC LIMIT ?"
+	query += " ORDER BY seq DESC LIMIT ?"
 	args = append(args, p.limit()+1)
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, "", err
 	}
-	out, err := collect(rows, func(r scanner) (domain.AuditEntry, error) { return scanAudit(r) })
+	found, err := collect(rows, scanAudit)
 	if err != nil {
 		return nil, "", err
 	}
 	next := ""
-	if len(out) > p.limit() {
-		out = out[:p.limit()]
-		last := out[len(out)-1]
-		next = cursor{at: ms(last.At), id: last.ID}.String()
+	if len(found) > p.limit() {
+		found = found[:p.limit()]
+		last := found[len(found)-1]
+		next = cursor{at: last.seq, id: last.ID}.String()
+	}
+	out := make([]domain.AuditEntry, len(found))
+	for i, f := range found {
+		out[i] = f.AuditEntry
 	}
 	return out, next, nil
 }
@@ -103,7 +114,7 @@ func (s *Store) PurgeAudit(ctx context.Context, cutoff time.Time, limit int) (in
 	var n int64
 	err := s.withTx(ctx, func(tx *sql.Tx) error {
 		r, err := tx.ExecContext(ctx, `DELETE FROM audit_log WHERE id IN
-			(SELECT id FROM audit_log WHERE at < ? ORDER BY at, id LIMIT ?)`, ms(cutoff), limit)
+			(SELECT id FROM audit_log WHERE at < ? ORDER BY at, seq LIMIT ?)`, ms(cutoff), limit)
 		if err != nil {
 			return err
 		}

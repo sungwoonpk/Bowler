@@ -4,7 +4,6 @@ package api
 
 import (
 	"crypto/rand"
-	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -37,6 +36,7 @@ func newError(status int, code, message string) *apiError {
 var (
 	errUnauthorized = newError(http.StatusUnauthorized, "unauthorized", "a valid API key is required")
 	errNotFound     = newError(http.StatusNotFound, "not_found", "no such resource")
+	errForbidden    = newError(http.StatusForbidden, "forbidden", "this credential may not do this")
 )
 
 func badRequest(message string) *apiError {
@@ -90,6 +90,8 @@ func (s *Server) wrap(h handler) http.HandlerFunc {
 			ae = newError(http.StatusConflict, "conflict", "a resource with this identifier already exists")
 		case errors.Is(err, store.ErrBadCursor):
 			ae = badRequest("the cursor is not valid")
+		case errors.Is(err, store.ErrTooManyTokens):
+			ae = newError(http.StatusConflict, "too_many_tokens", "this app already has the most tokens it may hold")
 		case errors.Is(err, store.ErrBadState):
 			ae = newError(http.StatusConflict, "bad_state", "this is not allowed in the delivery's current state")
 		default:
@@ -202,16 +204,27 @@ func (s *Server) middleware(next http.Handler) http.Handler {
 	})
 }
 
-// auth requires the API key. A caller who keeps sending a wrong one is slowed down.
+// auth requires the API key or an app token. A caller who keeps sending a wrong one is slowed down.
 //
-// The key is checked first and the throttle only applies to a wrong key. Checking the throttle first would lock out
-// a legitimate caller whenever someone else behind the same address, such as an office network, was guessing.
-func (s *Server) auth(next handler) handler {
+// The credential is checked first and the throttle only applies to a wrong one. Checking the throttle first would lock
+// out a legitimate caller whenever someone else behind the same address, such as an office network, was guessing.
+func (s *Server) auth(next handler) handler { return s.authAs(false, next) }
+
+// adminOnly is auth for routes that only the operator may use. A token is a valid credential and not a permitted one,
+// so it is refused with 403 and is not counted as a wrong key.
+func (s *Server) adminOnly(next handler) handler { return s.authAs(true, next) }
+
+func (s *Server) authAs(adminOnly bool, next handler) handler {
 	return func(w http.ResponseWriter, r *http.Request) error {
-		token, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
-		// Comparing in constant time means the response time does not reveal how much of a guess was right.
-		if ok && subtle.ConstantTimeCompare([]byte(token), []byte(s.apiKey)) == 1 {
-			return next(w, r)
+		p, ok, err := s.authenticate(r)
+		if err != nil {
+			return err
+		}
+		if ok {
+			if adminOnly && !p.admin {
+				return errForbidden
+			}
+			return next(w, withPrincipal(r, p))
 		}
 		ip := clientIP(r)
 		if wait := s.failures.blocked(ip, s.now()); wait > 0 {
