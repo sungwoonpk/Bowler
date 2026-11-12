@@ -26,6 +26,8 @@ Almost every product that has an API ends up sending webhooks, and almost every 
 
 - **Reliable delivery.** At least once. A message and its deliveries are stored in one transaction before `202`. Retries follow a schedule stretching over about a day, with jitter, and honour `Retry-After`.
 - **Isolation.** An endpoint has a concurrency (1 to 20). The queue takes only as many deliveries from an endpoint as it has free slots, so a backlog behind one slow receiver cannot starve the rest.
+- **Rate limits.** An endpoint can also be limited to a number of attempts per second (1 to 1000). The limit is kept in the database, so a restart does not reset it, and it applies to retries and to `recover`, so replaying a long outage does not flood a receiver that has just been fixed.
+- **Retention.** Finished messages are deleted with their deliveries and attempts after 30 days (`--retention`), oldest first, in small transactions that never hold the queue up. A message that still has work to do is never deleted.
 - **Signing.** `webhook-id`, `webhook-timestamp` and `webhook-signature` as the Standard Webhooks specification describes. Rotating a secret sends two signatures for a grace period, so receivers can switch without losing a message.
 - **A public verification package.** `signature` has no dependencies. A Go receiver verifies in one call. Receivers in other languages can use any Standard Webhooks library.
 - **SSRF protection.** https only, no private, loopback or metadata addresses, checked when a URL is registered and again on the address actually dialled. Redirects are not followed and proxies from the environment are ignored.
@@ -91,6 +93,7 @@ To try it against a server on your own machine, start it with `--allow-private -
 | `--lease`                       | timeout + 45s         | How long work taken by an instance that dies waits for another to take it                     |
 | `--drain`                       | `10s`                 | How long shutdown lets attempts finish                                                        |
 | `--max-payload`                 | `262144`              | Largest message payload, in bytes                                                             |
+| `--retention`, `BOWLER_RETENTION` | `720h` (30 days)    | How long finished messages and their history are kept. `0` keeps everything, otherwise at least `24h` |
 | `--log-format`, `--log-level`   | `json`, `info`        | `json` or `text`, and `debug`, `info`, `warn` or `error`                                      |
 | `--allow-private`, `--allow-http` | off                 | Development only. See the warning above                                                       |
 
@@ -130,8 +133,9 @@ Answer `2xx` to accept. Anything else is retried, except `410 Gone`, which switc
 | --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
 | A message that got `202` is not lost, even if the process is killed         | Exactly once. A crash or a slow answer can cause a repeat, so receivers must ignore a `webhook-id` they know |
 | Every attempt is recorded, with its status, duration and failure reason     | A particular order. A retry can be overtaken by a newer message                                         |
-| One endpoint cannot use more than its concurrency of the workers            | That a receiver is reachable. A receiver on a private network needs the development flag                |
+| One endpoint cannot use more than its concurrency of the workers, or start attempts faster than its rate limit | That a receiver is reachable. A receiver on a private network needs the development flag             |
 | Secrets and API keys are never written to the log                           | Encryption of the database. Signing secrets and payloads are stored as they are                         |
+| Finished data is deleted after the retention period                         | That the file gets smaller. Deleted space is reused, and shrinking the file needs a `VACUUM`            |
 
 ## How a delivery flows
 
@@ -154,8 +158,8 @@ Measured with `go test ./internal/dispatcher -bench . -benchtime 2000x`, on an A
 
 | What is measured                                         | Result                                            |
 | -------------------------------------------------------- | ------------------------------------------------- |
-| The queue and database alone (a sender that answers at once) | about 5,500 deliveries a second                |
-| Real signed HTTP requests over the loopback interface    | about 4,500 deliveries a second, four runs within 6% of each other |
+| The queue and database alone (a sender that answers at once) | about 6,800 to 7,400 deliveries a second       |
+| Real signed HTTP requests over the loopback interface    | about 5,700 to 6,300 deliveries a second, four runs |
 | Cost of choosing work, 1,000 to 50,000 deliveries waiting | about 0.2 ms, the same at every size              |
 
 Two problems found by measuring are worth knowing about, because both are the kind that only shows when the service is busy:
@@ -163,7 +167,9 @@ Two problems found by measuring are worth knowing about, because both are the ki
 - **A backlog made the queue slower.** Choosing work ranked every due delivery, so one claim took 2 ms with 1,000 waiting and 190 ms with 50,000, and a service that fell behind fell further behind. It now reads one endpoint at a time through partial indexes, and a test fails if the cost grows with the backlog.
 - **Half of all requests opened a new connection.** The HTTP client kept four idle connections per host while an endpoint may run twenty deliveries at once. Under load that used up local ports, and throughput swung between 27 and 4,200 deliveries a second. New connections fell from about 500 to about 19 per thousand deliveries.
 
-The ceiling now is SQLite's single writer: every result is its own write. Batching results and moving to a networked database are on the roadmap. These numbers are from one laptop on loopback. They show where the limits are, and are not a promise about your hardware or your customers' servers.
+Results are written in batches, which was the next limit. Every result used to be its own transaction, and a commit is most of the cost of a small write. A writer now takes results that arrive together and records them in one transaction (each with its own savepoint, so one bad result cannot spoil the rest). Run back to back on the same machine, that took the queue from about 4,000 to 4,900 up to about 6,300 to 6,900 deliveries a second, and real HTTP from about 5,000 to 5,800 up to about 7,500 to 7,900. The figures in the table above were measured separately, later, with the longer benchmark. This machine varies from hour to hour, so only a comparison made in one sitting means much. See [0006](docs/decisions/0006-batched-result-writes.md).
+
+The ceiling is still SQLite's single writer, only higher. Moving to a networked database is on the roadmap. These numbers are from one laptop on loopback. They show where the limits are, and are not a promise about your hardware or your customers' servers.
 
 ## Quality
 
@@ -171,7 +177,7 @@ The ceiling now is SQLite's single writer: every result is its own write. Batchi
 make check       # format, vet, staticcheck, errcheck, gosec, race tests with coverage, vulnerabilities
 ```
 
-- **148 tests** run with the race detector, and the libraries have **91% coverage**. CI fails under 85%.
+- **176 tests** run with the race detector, and the libraries have **91% coverage**. CI fails under 85%.
 - **A test that kills the real program.** It starts `bowler serve` as a separate process, sends twenty messages to a receiver that holds its requests open, waits until deliveries are in flight, kills the process with `kill -9`, starts it again on the same database, and checks that every message reaches the customer.
 - **Concurrency.** Twelve workers share one queue and each delivery is handed out exactly once. Three dispatchers share a queue and nothing is sent twice. A slow endpoint with two hundred deliveries behind it does not delay a healthy one.
 - **Failure handling.** Every status class, timeouts, refused connections, DNS failures, bad certificates, redirects, a reply that never ends, a sender that panics, a lease that is lost, shutdown mid-attempt.
@@ -189,7 +195,8 @@ Bowler/
 ├── retry/                the retry schedule, public, no dependencies
 ├── internal/
 │   ├── store/            the database and the queue: leases, fairness, replay, recovery
-│   ├── dispatcher/       runs the queue and shuts down in order
+│   ├── dispatcher/       runs the queue, writes results in batches, shuts down in order
+│   ├── retention/        deletes finished data after the retention period
 │   ├── deliver/          one attempt, and a verdict
 │   ├── ssrf/             which addresses may be called
 │   ├── api/              the HTTP interface, one file per resource
@@ -209,6 +216,9 @@ Written down in [docs/decisions](docs/decisions), each with what it costs:
 - [0003. Customer URLs are checked when registered and again when a connection is made](docs/decisions/0003-ssrf-at-connection-time.md)
 - [0004. One SQLite file and one static binary](docs/decisions/0004-sqlite-single-binary.md)
 - [0005. One receiver cannot hold up the rest, and a receiver that is fixed can catch up](docs/decisions/0005-isolation-and-recovery.md)
+- [0006. Results are written in batches by one writer](docs/decisions/0006-batched-result-writes.md)
+- [0007. An endpoint can be limited to a number of attempts per second](docs/decisions/0007-per-endpoint-rate-limit.md)
+- [0008. Finished data is deleted after a retention period](docs/decisions/0008-retention.md)
 
 ## Security
 
@@ -219,22 +229,24 @@ Written down in [docs/decisions](docs/decisions), each with what it costs:
 An honest list of what this version does not do:
 
 - **One node.** SQLite has one writer and one file. There is no replication, so back the file up.
-- **Signing secrets and payloads are stored unencrypted**, and nothing is deleted automatically. Use an encrypted volume.
+- **Signing secrets and payloads are stored unencrypted.** Payloads are deleted after the retention period, but until then they are in the clear, so use an encrypted volume.
+- **An idempotency key stops protecting once its message is deleted** by retention.
+- **A rate limit allows a burst of one second's worth** after a quiet time, and is kept on average, to within the 250 ms poll.
 - **One API key, and it can do everything.** There are no per-app keys, roles or audit log.
-- **No TLS and no API rate limit.** Put it behind a proxy.
+- **No TLS and no rate limit on the API itself.** Put it behind a proxy. The per-endpoint rate limit protects receivers, not the API.
 - **A receiver on a private network cannot be reached** without the global development flag, which removes the SSRF protection. There is no per-endpoint allow list yet.
 - **At least once, not exactly once, and no ordering guarantee.**
 - **HMAC signatures only.** The specification's asymmetric `v1a` scheme is not implemented.
 - **No interface for your customers.** It is an API. A page where a customer manages their endpoints and reads their delivery log is not built.
-- **Throughput is bounded by one SQLite writer**, measured above on one laptop.
+- **Throughput is bounded by one SQLite writer**, measured above on one laptop. Batching raised the bound and did not remove it.
 - **The Docker image is built and checked by CI**, and has not been built by hand on the author's machine.
 - **Demo grade.** It has had no independent security review.
 
 ## Roadmap
 
 1. Postgres, and more than one node
-2. Encrypt secrets at rest, and a retention limit for payloads
+2. Encrypt secrets at rest, and a retention period per app
 3. Per-app keys and an audit log
 4. A page for your customers to manage endpoints and read their delivery log
-5. Batch the writes of results, and rate limits per endpoint
+5. Wake the dispatcher exactly when a rate limit allows more, instead of on the next poll
 6. Asymmetric `v1a` signatures, and a per-endpoint allow list for private receivers

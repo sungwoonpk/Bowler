@@ -39,6 +39,7 @@ func (s *Server) createEndpoint(w http.ResponseWriter, r *http.Request) error {
 		Description string    `json:"description"`
 		EventTypes  *[]string `json:"event_types"`
 		Concurrency int       `json:"concurrency"`
+		RateLimit   int       `json:"rate_limit_per_second"`
 	}
 	if err := decode(w, r, &in); err != nil {
 		return err
@@ -63,17 +64,28 @@ func (s *Server) createEndpoint(w http.ResponseWriter, r *http.Request) error {
 	if in.Concurrency < 0 || in.Concurrency > domain.MaxConcurrency {
 		return badRequest("concurrency must be from 1 to " + strconv.Itoa(domain.MaxConcurrency))
 	}
+	if ae := validRate(in.RateLimit); ae != nil {
+		return ae
+	}
 	secret, err := signature.GenerateSecret()
 	if err != nil {
 		return err
 	}
 	ep, err := s.store.CreateEndpoint(r.Context(), store.NewEndpoint{
-		AppID: app.ID, URL: in.URL, Description: desc, EventTypes: types, Concurrency: in.Concurrency, Secret: secret,
+		AppID: app.ID, URL: in.URL, Description: desc, EventTypes: types, Concurrency: in.Concurrency, RatePerSecond: in.RateLimit, Secret: secret,
 	}, s.now())
 	if err != nil {
 		return err
 	}
 	writeJSON(w, http.StatusCreated, endpointWithSecret{Endpoint: ep, Secret: secret})
+	return nil
+}
+
+// validRate checks a rate limit. Zero means no limit.
+func validRate(n int) *apiError {
+	if n < 0 || n > domain.MaxRatePerSecond {
+		return badRequest("rate_limit_per_second must be 0 for no limit, or from 1 to " + strconv.Itoa(domain.MaxRatePerSecond))
+	}
 	return nil
 }
 
@@ -122,6 +134,7 @@ func (s *Server) updateEndpoint(w http.ResponseWriter, r *http.Request) error {
 		Description *string         `json:"description"`
 		EventTypes  json.RawMessage `json:"event_types"`
 		Concurrency *int            `json:"concurrency"`
+		RateLimit   *int            `json:"rate_limit_per_second"`
 		Disabled    *bool           `json:"disabled"`
 	}
 	if err := decode(w, r, &in); err != nil {
@@ -162,6 +175,12 @@ func (s *Server) updateEndpoint(w http.ResponseWriter, r *http.Request) error {
 			return badRequest("concurrency must be from 1 to " + strconv.Itoa(domain.MaxConcurrency))
 		}
 		up.Concurrency = in.Concurrency
+	}
+	if in.RateLimit != nil {
+		if ae := validRate(*in.RateLimit); ae != nil {
+			return ae
+		}
+		up.RatePerSecond = in.RateLimit
 	}
 	up.Disabled = in.Disabled
 	updated, err := s.store.UpdateEndpoint(r.Context(), app.ID, ep.ID, up, s.now())

@@ -35,7 +35,7 @@ type Claim struct {
 
 // endpointsWithWorkSQL lists the endpoints that have something ready, the ones waiting longest first.
 const endpointsWithWorkSQL = `
-SELECT e.id, e.concurrency
+SELECT e.id, e.concurrency, e.rate_per_second, e.rate_tat
 FROM endpoints e
 WHERE e.deleted_at IS NULL AND e.disabled_at IS NULL
   AND (EXISTS (SELECT 1 FROM deliveries d WHERE d.endpoint_id = e.id AND d.state = 'pending'  AND d.next_attempt_at <= ?1)
@@ -68,10 +68,12 @@ func readyIDs(ctx context.Context, tx *sql.Tx, now time.Time, limit int) ([]stri
 	type endpointSlots struct {
 		id          string
 		concurrency int
+		rate        int   // attempts per second, 0 for no limit
+		tat         int64 // milliseconds up to which the allowance is already handed out
 	}
 	endpoints, err := collect(rows, func(r scanner) (endpointSlots, error) {
 		var e endpointSlots
-		return e, r.Scan(&e.id, &e.concurrency)
+		return e, r.Scan(&e.id, &e.concurrency, &e.rate, &e.tat)
 	})
 	if err != nil {
 		return nil, err
@@ -90,6 +92,15 @@ func readyIDs(ctx context.Context, tx *sql.Tx, now time.Time, limit int) ([]stri
 		if free <= 0 {
 			continue
 		}
+		// A rate limit also bounds how many may start now. See rateAllowance.
+		nowMS := ms(now)
+		start := max(e.tat, nowMS)
+		if e.rate > 0 {
+			free = min(free, rateAllowance(e.rate, start, nowMS))
+			if free <= 0 {
+				continue
+			}
+		}
 		rows, err := tx.QueryContext(ctx, readySQL, e.id, ms(now), min(free, limit-len(ids)))
 		if err != nil {
 			return nil, err
@@ -102,8 +113,30 @@ func readyIDs(ctx context.Context, tx *sql.Tx, now time.Time, limit int) ([]stri
 			return nil, err
 		}
 		ids = append(ids, got...)
+		if e.rate > 0 && len(got) > 0 {
+			interval := rateInterval(e.rate)
+			if _, err := tx.ExecContext(ctx, `UPDATE endpoints SET rate_tat = ? WHERE id = ?`, start+int64(len(got))*interval, e.id); err != nil {
+				return nil, err
+			}
+		}
 	}
 	return ids, nil
+}
+
+// rateInterval is the gap, in milliseconds, between two attempts at the given rate.
+func rateInterval(perSecond int) int64 { return int64(1000 / perSecond) }
+
+// rateAllowance says how many attempts an endpoint may start now. Every attempt moves "start", the point up to which
+// the allowance is spent, forward by one interval, and the endpoint may run ahead of the clock by one second. So after a
+// quiet time up to one second's worth (the rate itself) can go at once, and after that the rate holds. This is the
+// generic cell rate algorithm, which needs one number per endpoint where a token bucket would need two.
+func rateAllowance(perSecond int, start, nowMS int64) int {
+	interval := rateInterval(perSecond)
+	room := nowMS + int64(perSecond)*interval - start
+	if room < interval {
+		return 0
+	}
+	return int(room / interval)
 }
 
 // ClaimDue hands up to limit ready deliveries to owner, each under a lease that lasts leaseFor.
@@ -254,81 +287,120 @@ type Completion struct {
 // The attempt is always kept, even if the lease was lost, because it really happened and a customer looking at the
 // history should see it. In that case Complete returns ErrLeaseLost and leaves the delivery's state alone.
 func (s *Store) Complete(ctx context.Context, c Completion) error {
-	now := c.Now.UTC().Truncate(time.Millisecond)
-	lost := false
-	err := s.withTx(ctx, func(tx *sql.Tx) error {
-		a := c.Attempt
-		// An attempt without a trigger would break a constraint and leave the delivery stuck until its lease ran out.
-		// Scheduled is the safe default.
-		if a.Trigger == "" {
-			a.Trigger = domain.Scheduled
-		}
-		_, err := tx.ExecContext(ctx,
-			`INSERT INTO attempts (id, delivery_id, started_at, duration_ms, status_code, failure, response_snippet, trigger)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-			id.New(id.Attempt), c.DeliveryID, ms(a.StartedAt), a.Duration.Milliseconds(),
-			sql.NullInt64{Int64: int64(a.StatusCode), Valid: a.StatusCode != 0},
-			sql.NullString{String: string(a.Failure), Valid: a.Failure != ""},
-			sql.NullString{String: a.ResponseSnippet, Valid: a.ResponseSnippet != ""},
-			string(a.Trigger))
-		if err != nil {
-			return err
-		}
+	return s.CompleteBatch(ctx, []Completion{c})[0]
+}
 
-		var (
-			state  domain.State
-			finish sql.NullInt64
-			next   = ms(now)
-		)
-		switch c.Result {
-		case ResultSucceeded:
-			state, finish = domain.Succeeded, sql.NullInt64{Int64: ms(now), Valid: true}
-		case ResultFailed:
-			state, finish = domain.Failed, sql.NullInt64{Int64: ms(now), Valid: true}
-		default:
-			state, next = domain.Pending, ms(c.NextAttemptAt)
-		}
-		res, err := tx.ExecContext(ctx,
-			`UPDATE deliveries
-			 SET state = ?, next_attempt_at = ?, finished_at = ?, lease_until = NULL, lease_owner = NULL, manual = 0,
-			     last_status = ?, last_failure = ?
-			 WHERE id = ? AND state = 'inflight' AND lease_owner = ?`,
-			string(state), next, finish,
-			sql.NullInt64{Int64: int64(a.StatusCode), Valid: a.StatusCode != 0},
-			sql.NullString{String: string(a.Failure), Valid: a.Failure != ""},
-			c.DeliveryID, c.Owner)
-		if err != nil {
-			return err
-		}
-		if n, _ := res.RowsAffected(); n == 0 {
-			lost = true
-			return nil
-		}
-		if c.DisableEndpoint != "" {
-			if _, err = tx.ExecContext(ctx,
-				`UPDATE endpoints SET disabled_at = ?, disabled_reason = ?
-				 WHERE id = (SELECT endpoint_id FROM deliveries WHERE id = ?) AND disabled_at IS NULL`,
-				ms(now), c.DisableEndpoint, c.DeliveryID); err != nil {
+// CompleteBatch records several results in one transaction and returns one error per result, in the same order, nil for
+// each that was recorded.
+//
+// Every result used to be its own transaction, and the number of write transactions a second is what limits a single
+// SQLite writer. Recording many in one makes the cost of the commit shared.
+//
+// Each result runs inside its own savepoint, so one that fails (a bad value, say) is undone alone and the others are
+// kept. Without that, one bad result would roll back all the rest, and every delivery in the batch would wait for its
+// lease to run out.
+func (s *Store) CompleteBatch(ctx context.Context, batch []Completion) []error {
+	errs := make([]error, len(batch))
+	if len(batch) == 0 {
+		return errs
+	}
+	txErr := s.withTx(ctx, func(tx *sql.Tx) error {
+		for i, c := range batch {
+			if _, err := tx.ExecContext(ctx, "SAVEPOINT result"); err != nil {
 				return err
 			}
-			// The endpoint was switched off because the receiver refused for good, so the deliveries still waiting for
-			// it are finished too, as failed. Left pending they would never end and never show up as something to
-			// recover. RecoverEndpoint replays them once the receiver is fixed. An endpoint a person switched off by
-			// hand is different: that is a pause, and its deliveries wait.
-			_, err = tx.ExecContext(ctx,
-				`UPDATE deliveries SET state = 'failed', finished_at = ?, last_failure = ?, lease_until = NULL, lease_owner = NULL, manual = 0
-				 WHERE endpoint_id = (SELECT endpoint_id FROM deliveries WHERE id = ?) AND state = 'pending'`,
-				ms(now), string(domain.FailEndpointDisabled), c.DeliveryID)
+			lost, err := completeOne(ctx, tx, c)
+			switch {
+			case err != nil:
+				errs[i] = fmt.Errorf("store: complete delivery %s: %w", c.DeliveryID, err)
+				if _, rerr := tx.ExecContext(ctx, "ROLLBACK TO result"); rerr != nil {
+					return rerr
+				}
+			case lost:
+				errs[i] = ErrLeaseLost
+			}
+			if _, err := tx.ExecContext(ctx, "RELEASE result"); err != nil {
+				return err
+			}
 		}
-		return err
+		return nil
 	})
+	if txErr != nil {
+		// The transaction itself failed, so nothing was recorded and every result shares the cause.
+		for i, c := range batch {
+			errs[i] = fmt.Errorf("store: complete delivery %s: %w", c.DeliveryID, txErr)
+		}
+	}
+	return errs
+}
+
+// completeOne records one result inside a transaction. lost is true when the delivery's lease had been given away, in
+// which case only the attempt is kept.
+func completeOne(ctx context.Context, tx *sql.Tx, c Completion) (lost bool, err error) {
+	now := c.Now.UTC().Truncate(time.Millisecond)
+	a := c.Attempt
+	// An attempt without a trigger would break a constraint and leave the delivery stuck until its lease ran out.
+	// Scheduled is the safe default.
+	if a.Trigger == "" {
+		a.Trigger = domain.Scheduled
+	}
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO attempts (id, delivery_id, started_at, duration_ms, status_code, failure, response_snippet, trigger)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		id.New(id.Attempt), c.DeliveryID, ms(a.StartedAt), a.Duration.Milliseconds(),
+		sql.NullInt64{Int64: int64(a.StatusCode), Valid: a.StatusCode != 0},
+		sql.NullString{String: string(a.Failure), Valid: a.Failure != ""},
+		sql.NullString{String: a.ResponseSnippet, Valid: a.ResponseSnippet != ""},
+		string(a.Trigger)); err != nil {
+		return false, err
+	}
+
+	var (
+		state  domain.State
+		finish sql.NullInt64
+		next   = ms(now)
+	)
+	switch c.Result {
+	case ResultSucceeded:
+		state, finish = domain.Succeeded, sql.NullInt64{Int64: ms(now), Valid: true}
+	case ResultFailed:
+		state, finish = domain.Failed, sql.NullInt64{Int64: ms(now), Valid: true}
+	default:
+		state, next = domain.Pending, ms(c.NextAttemptAt)
+	}
+	res, err := tx.ExecContext(ctx,
+		`UPDATE deliveries
+		 SET state = ?, next_attempt_at = ?, finished_at = ?, lease_until = NULL, lease_owner = NULL, manual = 0,
+		     last_status = ?, last_failure = ?
+		 WHERE id = ? AND state = 'inflight' AND lease_owner = ?`,
+		string(state), next, finish,
+		sql.NullInt64{Int64: int64(a.StatusCode), Valid: a.StatusCode != 0},
+		sql.NullString{String: string(a.Failure), Valid: a.Failure != ""},
+		c.DeliveryID, c.Owner)
 	if err != nil {
-		return fmt.Errorf("store: complete delivery %s: %w", c.DeliveryID, err)
+		return false, err
 	}
-	if lost {
-		return ErrLeaseLost
+	if n, _ := res.RowsAffected(); n == 0 {
+		return true, nil
 	}
-	return nil
+	if c.DisableEndpoint == "" {
+		return false, nil
+	}
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE endpoints SET disabled_at = ?, disabled_reason = ?
+		 WHERE id = (SELECT endpoint_id FROM deliveries WHERE id = ?) AND disabled_at IS NULL`,
+		ms(now), c.DisableEndpoint, c.DeliveryID); err != nil {
+		return false, err
+	}
+	// The endpoint was switched off because the receiver refused for good, so the deliveries still waiting for it are
+	// finished too, as failed. Left pending they would never end and never show up as something to recover.
+	// RecoverEndpoint replays them once the receiver is fixed. An endpoint a person switched off by hand is different:
+	// that is a pause, and its deliveries wait.
+	_, err = tx.ExecContext(ctx,
+		`UPDATE deliveries SET state = 'failed', finished_at = ?, last_failure = ?, lease_until = NULL, lease_owner = NULL, manual = 0
+		 WHERE endpoint_id = (SELECT endpoint_id FROM deliveries WHERE id = ?) AND state = 'pending'`,
+		ms(now), string(domain.FailEndpointDisabled), c.DeliveryID)
+	return false, err
 }
 
 // Release hands a claimed delivery back without counting an attempt. A worker that is shutting down uses it for

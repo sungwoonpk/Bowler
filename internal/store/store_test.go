@@ -893,3 +893,234 @@ func TestDeletingSomeoneElsesEndpointFails(t *testing.T) {
 		t.Fatalf("history of a deleted endpoint should still be readable: %v", err)
 	}
 }
+
+func TestCompleteBatchRecordsEveryResultInOneTransaction(t *testing.T) {
+	w := newWorld(t)
+	w.endpoint(t, "https://a.example/hook", nil, 10)
+	var ds []domain.Delivery
+	for range 5 {
+		_, d := w.send(t, "x", t0)
+		ds = append(ds, d...)
+	}
+	claims, _ := w.s.ClaimDue(ctx(), t0, time.Minute, "w", 10)
+	if len(claims) != 5 {
+		t.Fatalf("setup: %d", len(claims))
+	}
+	var batch []Completion
+	for i, c := range claims {
+		r := ResultSucceeded
+		if i%2 == 1 {
+			r = ResultFailed
+		}
+		batch = append(batch, Completion{DeliveryID: c.Delivery.ID, Owner: "w", Result: r, Now: t0,
+			Attempt: domain.Attempt{StartedAt: t0, StatusCode: 200, Trigger: domain.Scheduled}})
+	}
+	for i, err := range w.s.CompleteBatch(ctx(), batch) {
+		if err != nil {
+			t.Fatalf("result %d: %v", i, err)
+		}
+	}
+	counts, _ := w.s.CountByState(ctx())
+	if counts[domain.Succeeded] != 3 || counts[domain.Failed] != 2 {
+		t.Fatalf("every result should be applied: %v", counts)
+	}
+	for _, d := range ds {
+		if as, _ := w.s.ListAttempts(ctx(), w.app.ID, d.ID); len(as) != 1 {
+			t.Fatalf("each delivery has one attempt, %s has %d", d.ID, len(as))
+		}
+	}
+}
+
+func TestCompleteBatchIsolatesAResultThatFails(t *testing.T) {
+	w := newWorld(t)
+	w.endpoint(t, "https://a.example/hook", nil, 10)
+	for range 3 {
+		w.send(t, "x", t0)
+	}
+	claims, _ := w.s.ClaimDue(ctx(), t0, time.Minute, "w", 10)
+	good := func(c Claim) Completion {
+		return Completion{DeliveryID: c.Delivery.ID, Owner: "w", Result: ResultSucceeded, Now: t0,
+			Attempt: domain.Attempt{StartedAt: t0, StatusCode: 200, Trigger: domain.Scheduled}}
+	}
+	bad := good(claims[1])
+	bad.Attempt.Trigger = "not-a-trigger" // breaks a constraint in the database
+
+	errs := w.s.CompleteBatch(ctx(), []Completion{good(claims[0]), bad, good(claims[2])})
+	if errs[0] != nil || errs[2] != nil {
+		t.Fatalf("the good results must not be affected by the bad one: %v", errs)
+	}
+	if errs[1] == nil || errors.Is(errs[1], ErrLeaseLost) {
+		t.Fatalf("the bad result must report its own failure: %v", errs[1])
+	}
+	counts, _ := w.s.CountByState(ctx())
+	if counts[domain.Succeeded] != 2 || counts[domain.InFlight] != 1 {
+		t.Fatalf("two recorded, and the bad one is left for its lease to run out: %v", counts)
+	}
+	if as, _ := w.s.ListAttempts(ctx(), w.app.ID, claims[1].Delivery.ID); len(as) != 0 {
+		t.Fatalf("a failed result must leave nothing behind, not even its attempt: %d", len(as))
+	}
+}
+
+func TestCompleteBatchReportsLostLeasesPerResult(t *testing.T) {
+	w := newWorld(t)
+	w.endpoint(t, "https://a.example/hook", nil, 10)
+	w.send(t, "x", t0)
+	w.send(t, "x", t0)
+	claims, _ := w.s.ClaimDue(ctx(), t0, time.Minute, "w", 10)
+	mine := Completion{DeliveryID: claims[0].Delivery.ID, Owner: "w", Result: ResultSucceeded, Now: t0, Attempt: domain.Attempt{StartedAt: t0, Trigger: domain.Scheduled}}
+	stolen := Completion{DeliveryID: claims[1].Delivery.ID, Owner: "someone-else", Result: ResultSucceeded, Now: t0, Attempt: domain.Attempt{StartedAt: t0, Trigger: domain.Scheduled}}
+	errs := w.s.CompleteBatch(ctx(), []Completion{mine, stolen})
+	if errs[0] != nil || !errors.Is(errs[1], ErrLeaseLost) {
+		t.Fatalf("%v", errs)
+	}
+	if d, _ := w.s.GetDelivery(ctx(), w.app.ID, claims[1].Delivery.ID); d.State != domain.InFlight {
+		t.Fatalf("a result from the wrong owner must not change the delivery: %s", d.State)
+	}
+}
+
+func TestCompleteBatchOfNothingIsFine(t *testing.T) {
+	w := newWorld(t)
+	if errs := w.s.CompleteBatch(ctx(), nil); len(errs) != 0 {
+		t.Fatalf("%v", errs)
+	}
+}
+
+func (w world) limitedEndpoint(t *testing.T, url string, perSecond int) domain.Endpoint {
+	t.Helper()
+	e, err := w.s.CreateEndpoint(context.Background(), NewEndpoint{AppID: w.app.ID, URL: url, Concurrency: 20, RatePerSecond: perSecond, Secret: "whsec_c2VjcmV0"}, t0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return e
+}
+
+// finish reports every claim as delivered, which frees the endpoint's concurrency slots without touching its rate.
+func (w world) finish(t *testing.T, claims []Claim, at time.Time) {
+	t.Helper()
+	for _, c := range claims {
+		if err := w.s.Complete(ctx(), Completion{DeliveryID: c.Delivery.ID, Owner: "w", Result: ResultSucceeded, Now: at,
+			Attempt: domain.Attempt{StartedAt: at, StatusCode: 200, Trigger: domain.Scheduled}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestRateLimitAllowsABurstOfOneSecondThenHoldsTheRate(t *testing.T) {
+	w := newWorld(t)
+	w.limitedEndpoint(t, "https://a.example/hook", 10)
+	for range 100 {
+		w.send(t, "x", t0)
+	}
+
+	first, err := w.s.ClaimDue(ctx(), t0, time.Minute, "w", 50)
+	if err != nil || len(first) != 10 {
+		t.Fatalf("after a quiet time one second's worth may go at once: got %d, %v", len(first), err)
+	}
+	w.finish(t, first, t0)
+	if more, _ := w.s.ClaimDue(ctx(), t0, time.Minute, "w", 50); len(more) != 0 {
+		t.Fatalf("the allowance is spent: got %d", len(more))
+	}
+	if more, _ := w.s.ClaimDue(ctx(), t0.Add(50*time.Millisecond), time.Minute, "w", 50); len(more) != 0 {
+		t.Fatalf("half an interval later nothing is allowed: got %d", len(more))
+	}
+	// Ten per second means one every 100ms.
+	if more, _ := w.s.ClaimDue(ctx(), t0.Add(100*time.Millisecond), time.Minute, "w", 50); len(more) != 1 {
+		t.Fatalf("one interval later exactly one is allowed: got %d", len(more))
+	}
+	// Over the next ten seconds the endpoint gets about a hundred more, never more than the rate.
+	total := 0
+	for ms := 200; ms <= 5000; ms += 10 {
+		got, _ := w.s.ClaimDue(ctx(), t0.Add(time.Duration(ms)*time.Millisecond), time.Minute, "w", 50)
+		w.finish(t, got, t0.Add(time.Duration(ms)*time.Millisecond))
+		total += len(got)
+	}
+	if want := 48; total < want-1 || total > want+1 {
+		t.Fatalf("between 100ms and 5s at 10 per second about %d more should go, got %d", want, total)
+	}
+}
+
+func TestRateLimitOfOneEndpointDoesNotSlowAnother(t *testing.T) {
+	w := newWorld(t)
+	slow := w.limitedEndpoint(t, "https://slow.example/hook", 1)
+	free := w.limitedEndpoint(t, "https://free.example/hook", 0)
+	for range 30 {
+		w.send(t, "x", t0)
+	}
+	got, err := w.s.ClaimDue(ctx(), t0, time.Minute, "w", 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	per := map[string]int{}
+	for _, c := range got {
+		per[c.Endpoint.ID]++
+	}
+	if per[slow.ID] != 1 || per[free.ID] != 20 {
+		t.Fatalf("the limited endpoint gets one, the other its whole concurrency of 20: %v", per)
+	}
+}
+
+func TestRateLimitIsKeptAcrossARestart(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "bowler.db")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	app, _ := s.CreateApp(ctx(), "acme", nil, t0)
+	if _, err := s.CreateEndpoint(ctx(), NewEndpoint{AppID: app.ID, URL: "https://a.example/h", Concurrency: 20, RatePerSecond: 5, Secret: "whsec_c2VjcmV0"}, t0); err != nil {
+		t.Fatal(err)
+	}
+	for range 20 {
+		s.CreateMessage(ctx(), NewMessage{AppID: app.ID, EventType: "x", Payload: json.RawMessage(`{}`)}, t0)
+	}
+	if got, _ := s.ClaimDue(ctx(), t0, time.Minute, "w", 50); len(got) != 5 {
+		t.Fatalf("setup: got %d", len(got))
+	}
+	s.Close()
+
+	s, err = Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if got, _ := s.ClaimDue(ctx(), t0, time.Minute, "w", 50); len(got) != 0 {
+		t.Fatalf("a restart must not hand out a fresh allowance, got %d", len(got))
+	}
+}
+
+func TestRateLimitCanBeChangedAndRemoved(t *testing.T) {
+	w := newWorld(t)
+	e := w.limitedEndpoint(t, "https://a.example/hook", 1)
+	for range 10 {
+		w.send(t, "x", t0)
+	}
+	if got, _ := w.s.ClaimDue(ctx(), t0, time.Minute, "w", 50); len(got) != 1 {
+		t.Fatalf("limited to one: %d", len(got))
+	}
+	zero := 0
+	up, err := w.s.UpdateEndpoint(ctx(), w.app.ID, e.ID, EndpointUpdate{RatePerSecond: &zero}, t0)
+	if err != nil || up.RatePerSecond != 0 {
+		t.Fatalf("limit not removed: %+v %v", up, err)
+	}
+	if got, _ := w.s.ClaimDue(ctx(), t0, time.Minute, "w", 50); len(got) != 9 {
+		t.Fatalf("without a limit the rest go at once: %d", len(got))
+	}
+}
+
+func TestRateAllowanceArithmetic(t *testing.T) {
+	for _, c := range []struct {
+		rate       int
+		start, now int64
+		want       int
+	}{
+		{10, 1000, 1000, 10}, // quiet: one second's worth
+		{10, 2000, 1000, 0},  // a full second ahead: nothing
+		{10, 1900, 1000, 1},  // 900ms ahead leaves room for one
+		{1, 1000, 1000, 1},
+		{1000, 5000, 5000, 1000},
+		{3, 1000, 1000, 3}, // 333ms interval, 999ms of room
+	} {
+		if got := rateAllowance(c.rate, c.start, c.now); got != c.want {
+			t.Errorf("rate %d start %d now %d: got %d, want %d", c.rate, c.start, c.now, got, c.want)
+		}
+	}
+}

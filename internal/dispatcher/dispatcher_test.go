@@ -458,3 +458,61 @@ func TestOwnersDifferByDefault(t *testing.T) {
 		t.Fatal("two dispatchers must not share an owner name, or one could finish the other's work")
 	}
 }
+
+func TestResultsAreWrittenInBatches(t *testing.T) {
+	e := newEnv(t)
+	e.endpoint(t, 20)
+	var ids []string
+	for range 100 {
+		ids = append(ids, e.send(t)[0].ID)
+	}
+	d, _ := start(t, e, fakeSender(func(_ context.Context, c store.Claim) deliver.Outcome { return ok(c) }),
+		Config{Workers: 50, BatchWindow: 20 * time.Millisecond})
+	eventually(t, 5*time.Second, "all deliveries to finish", func() bool {
+		for _, id := range ids {
+			if e.delivery(t, id).State != domain.Succeeded {
+				return false
+			}
+		}
+		return true
+	})
+	st := d.Stats()
+	if st.Results != 100 {
+		t.Fatalf("every result is written exactly once, got %d", st.Results)
+	}
+	if st.ResultBatches >= st.Results/2 {
+		t.Fatalf("results that arrive together should share a transaction: %d results in %d batches", st.Results, st.ResultBatches)
+	}
+	for _, id := range ids {
+		if n := len(e.attempts(t, id)); n != 1 {
+			t.Fatalf("each delivery has one attempt recorded, %s has %d", id, n)
+		}
+	}
+}
+
+func TestARateLimitHoldsBackAnEndpointButEverythingIsStillSent(t *testing.T) {
+	e := newEnv(t)
+	_, err := e.s.CreateEndpoint(context.Background(), store.NewEndpoint{AppID: e.app.ID, URL: "https://example.com/hook", Concurrency: 20, RatePerSecond: 10, Secret: "whsec_c2VjcmV0"}, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range 25 {
+		e.send(t)
+	}
+	var sent atomic.Int32
+	startedAt := time.Now()
+	start(t, e, fakeSender(func(_ context.Context, c store.Claim) deliver.Outcome {
+		sent.Add(1)
+		return ok(c)
+	}), Config{Workers: 50})
+
+	time.Sleep(300 * time.Millisecond)
+	// One second's worth may go at once, then ten per second: about 13 after 300ms. Allow for timing.
+	if n := sent.Load(); n < 10 || n > 16 {
+		t.Fatalf("after 300ms between 10 and 16 attempts should have started, got %d", n)
+	}
+	eventually(t, 6*time.Second, "every delivery to be sent in the end", func() bool { return sent.Load() == 25 })
+	if took := time.Since(startedAt); took < 1200*time.Millisecond {
+		t.Fatalf("25 attempts at 10 per second with a burst of 10 cannot finish in under about 1.5s, took %s", took)
+	}
+}

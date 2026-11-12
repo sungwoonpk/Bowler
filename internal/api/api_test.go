@@ -16,6 +16,7 @@ import (
 
 	"github.com/sungwoonpk/bowler/internal/deliver"
 	"github.com/sungwoonpk/bowler/internal/dispatcher"
+	"github.com/sungwoonpk/bowler/internal/retention"
 	"github.com/sungwoonpk/bowler/internal/ssrf"
 	"github.com/sungwoonpk/bowler/internal/store"
 	"github.com/sungwoonpk/bowler/retry"
@@ -84,6 +85,7 @@ type setup struct {
 	policy     ssrf.Policy
 	maxPayload int
 	noWorker   bool
+	retention  func() retention.Stats
 }
 
 func newHarness(t *testing.T, opts ...func(*setup)) *harness {
@@ -112,7 +114,7 @@ func newHarness(t *testing.T, opts ...func(*setup)) *harness {
 		go func() { disp.Run(ctx); close(done) }()
 		t.Cleanup(func() { cancel(); <-done })
 	}
-	api, err := New(Config{Store: st, APIKey: testKey, SSRF: cfg.policy, Notify: disp.Notify, Stats: disp.Stats, MaxPayloadBytes: cfg.maxPayload, Version: "test"})
+	api, err := New(Config{Store: st, APIKey: testKey, SSRF: cfg.policy, Notify: disp.Notify, Stats: disp.Stats, Retention: cfg.retention, MaxPayloadBytes: cfg.maxPayload, Version: "test"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -419,6 +421,15 @@ func TestEndpointLifecycle(t *testing.T) {
 	if r := h.do("PATCH", base, map[string]any{"description": "payments", "concurrency": 5}); r.status != 200 || str(r.body, "description") != "payments" || fmt.Sprint(r.body["event_types"]) != "[invoice.paid]" {
 		t.Fatalf("leaving event_types out leaves it alone: %d %s", r.status, r.raw)
 	}
+	if r := h.do("PATCH", base, map[string]any{"rate_limit_per_second": 25}); r.status != 200 || r.body["rate_limit_per_second"] != float64(25) || r.body["concurrency"] != float64(5) {
+		t.Fatalf("a rate limit can be set without touching the rest: %d %s", r.status, r.raw)
+	}
+	if r := h.do("GET", base, nil); r.body["rate_limit_per_second"] != float64(25) {
+		t.Fatalf("the limit is shown: %s", r.raw)
+	}
+	if r := h.do("PATCH", base, map[string]any{"rate_limit_per_second": 0}); r.status != 200 || r.body["rate_limit_per_second"] != float64(0) {
+		t.Fatalf("zero removes the limit: %d %s", r.status, r.raw)
+	}
 	if r := h.do("PATCH", base, map[string]any{"event_types": []string{"a", "b"}}); fmt.Sprint(r.body["event_types"]) != "[a b]" {
 		t.Fatalf("%s", r.raw)
 	}
@@ -435,6 +446,8 @@ func TestEndpointLifecycle(t *testing.T) {
 		"bad url":          map[string]any{"url": "ftp://x"},
 		"zero concurrency": map[string]any{"concurrency": 0},
 		"huge concurrency": map[string]any{"concurrency": 99},
+		"negative rate":    map[string]any{"rate_limit_per_second": -1},
+		"huge rate":        map[string]any{"rate_limit_per_second": 1001},
 		"bad type":         map[string]any{"event_types": []string{"has space"}},
 		"not a list":       `{"event_types": 5}`,
 	} {
@@ -764,7 +777,7 @@ func TestMetricsAndHealth(t *testing.T) {
 
 	m := h.do("GET", "/metrics", nil)
 	text := string(m.raw)
-	for _, want := range []string{`bowler_deliveries{state="succeeded"} 1`, "bowler_attempts_total{result=\"succeeded\"} 1", "bowler_claimed_total 1", `bowler_build_info{version="test"} 1`} {
+	for _, want := range []string{`bowler_deliveries{state="succeeded"} 1`, "bowler_attempts_total{result=\"succeeded\"} 1", "bowler_claimed_total 1", "bowler_results_total 1", "bowler_result_batches_total 1", `bowler_build_info{version="test"} 1`} {
 		if !strings.Contains(text, want) {
 			t.Errorf("metrics should contain %q:\n%s", want, text)
 		}
@@ -857,6 +870,8 @@ func TestEndpointCreationValidation(t *testing.T) {
 		"too many types":       {"url": rc.srv.URL, "event_types": make([]string, 51)},
 		"negative concurrency": {"url": rc.srv.URL, "concurrency": -1},
 		"huge concurrency":     {"url": rc.srv.URL, "concurrency": 21},
+		"negative rate":        {"url": rc.srv.URL, "rate_limit_per_second": -5},
+		"huge rate":            {"url": rc.srv.URL, "rate_limit_per_second": 1001},
 	}
 	for name, body := range cases {
 		if r := h.do("POST", "/v1/apps/"+app+"/endpoints", body); r.status != 400 {
@@ -891,5 +906,39 @@ func TestThePayloadReachesTheReceiverByteForByte(t *testing.T) {
 	}
 	if err := signature.Verify([]string{secret}, got.id, got.timestamp, got.signature, got.body, time.Now(), 0); err != nil {
 		t.Fatalf("the signature must cover those same bytes: %v", err)
+	}
+}
+
+func TestEndpointCanBeCreatedWithARateLimit(t *testing.T) {
+	h := newHarness(t, func(s *setup) { s.noWorker = true })
+	app := h.app("a")
+	rc := newReceiver(t)
+	r := h.do("POST", "/v1/apps/"+app+"/endpoints", map[string]any{"url": rc.srv.URL, "rate_limit_per_second": 7})
+	if r.status != 201 || r.body["rate_limit_per_second"] != float64(7) {
+		t.Fatalf("%d %s", r.status, r.raw)
+	}
+	r = h.do("POST", "/v1/apps/"+app+"/endpoints", map[string]any{"url": rc.srv.URL})
+	if r.status != 201 || r.body["rate_limit_per_second"] != float64(0) {
+		t.Fatalf("no limit by default: %d %s", r.status, r.raw)
+	}
+}
+
+func TestMetricsShowRetentionOnlyWhenItIsOn(t *testing.T) {
+	off := newHarness(t, func(s *setup) { s.noWorker = true })
+	if text := string(off.do("GET", "/metrics", nil).raw); strings.Contains(text, "bowler_retention") {
+		t.Errorf("with retention off its metrics should be absent:\n%s", text)
+	}
+	on := newHarness(t, func(s *setup) {
+		s.noWorker = true
+		s.retention = func() retention.Stats {
+			return retention.Stats{Messages: 7, Deliveries: 9, Attempts: 11, Endpoints: 1, Errors: 2}
+		}
+	})
+	text := string(on.do("GET", "/metrics", nil).raw)
+	for _, want := range []string{`bowler_retention_deleted_total{kind="messages"} 7`, `bowler_retention_deleted_total{kind="deliveries"} 9`,
+		`bowler_retention_deleted_total{kind="attempts"} 11`, `bowler_retention_deleted_total{kind="endpoints"} 1`, "bowler_retention_errors_total 2"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("metrics should contain %q:\n%s", want, text)
+		}
 	}
 }

@@ -35,6 +35,18 @@ func (s *Server) metrics(w http.ResponseWriter, r *http.Request) error {
 		fmt.Fprintf(&b, "bowler_store_errors_total %d\n", st.StoreError)
 		b.WriteString("# HELP bowler_sender_panics_total Panics recovered while sending.\n# TYPE bowler_sender_panics_total counter\n")
 		fmt.Fprintf(&b, "bowler_sender_panics_total %d\n", st.Panics)
+		b.WriteString("# HELP bowler_result_batches_total Database transactions used to record attempt results.\n# TYPE bowler_result_batches_total counter\n")
+		fmt.Fprintf(&b, "bowler_result_batches_total %d\n", st.ResultBatches)
+		b.WriteString("# HELP bowler_results_total Attempt results recorded. Divided by the batches, the average batch size.\n# TYPE bowler_results_total counter\n")
+		fmt.Fprintf(&b, "bowler_results_total %d\n", st.Results)
+	}
+	if s.retention != nil {
+		st := s.retention()
+		b.WriteString("# HELP bowler_retention_deleted_total Rows deleted because they were older than the retention period.\n# TYPE bowler_retention_deleted_total counter\n")
+		fmt.Fprintf(&b, "bowler_retention_deleted_total{kind=\"messages\"} %d\nbowler_retention_deleted_total{kind=\"deliveries\"} %d\n", st.Messages, st.Deliveries)
+		fmt.Fprintf(&b, "bowler_retention_deleted_total{kind=\"attempts\"} %d\nbowler_retention_deleted_total{kind=\"endpoints\"} %d\n", st.Attempts, st.Endpoints)
+		b.WriteString("# HELP bowler_retention_errors_total Retention sweeps that failed.\n# TYPE bowler_retention_errors_total counter\n")
+		fmt.Fprintf(&b, "bowler_retention_errors_total %d\n", st.Errors)
 	}
 	b.WriteString("# HELP bowler_build_info The running version.\n# TYPE bowler_build_info gauge\n")
 	fmt.Fprintf(&b, "bowler_build_info{version=%q} 1\n", s.version)

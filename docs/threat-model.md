@@ -51,6 +51,8 @@ someone deciding whether to trust the service, so the gaps are listed as plainly
 | A lost event on a crash                                     | The message and its deliveries are stored in one transaction before `202`, and work is taken under a lease                                      | `cmd` test with `kill -9`           |
 | Two workers sending the same delivery                       | The claim happens in a transaction that takes the write lock, and a worker that lost its lease cannot overwrite the new holder's result         | `store`, `dispatcher` tests         |
 | A running attempt given to a second worker                  | The program refuses a lease that is not clearly longer than the attempt timeout                                                                 | `cmd`, `dispatcher` tests           |
+| A customer's server flooded by a burst or a replay          | An optional per-endpoint rate limit, enforced when work is chosen and kept in the database, so a restart does not reset it                      | `store`, `dispatcher` tests         |
+| Customer data kept for ever                                 | Finished messages, with their deliveries and attempts, are deleted after a retention period, never while any work on them is left               | `store`, `retention` tests          |
 | An endpoint marked gone being retried for ever              | A `410` switches the endpoint off and finishes what was waiting, and `recover` brings it back                                                   | `store`, `api`, demo                |
 | Events lost to a customer during an outage                  | `recover` also creates deliveries for messages that arrived while the endpoint was off                                                          | `store`, `api` tests                |
 
@@ -61,12 +63,15 @@ These are real gaps. Read them before relying on the service.
 - **Signing secrets are stored in the clear** in the SQLite file. They have to be readable to sign with. Anyone who can read the file
   can forge webhooks to every endpoint. Keep the file on an encrypted volume that only the service can read. Encrypting the secrets
   with a key kept outside the file is on the roadmap.
-- **Payloads and the first kilobyte of each reply are stored** in the file too, and may contain personal data. There is no retention
-  limit yet, so nothing is deleted automatically.
+- **Payloads and the first kilobyte of each reply are stored** in the file too, and may contain personal data. They are deleted
+  after the retention period (30 days unless changed), but until then they sit in the clear, and a backup taken earlier keeps
+  them. Deleted rows do not shrink the file, and the space is reused until a `VACUUM`, so deleted text may still be in the file
+  on disk.
 - **There is one API key, and it is all-powerful.** There are no per-app keys, no roles and no audit log of who did what. Put Bowler
   behind your own backend, and do not hand the key to anything you do not trust fully.
 - **No TLS.** The API speaks plain HTTP. Run it behind a reverse proxy or load balancer that terminates TLS.
-- **No rate limit on the API** except on wrong keys. A caller with the key can send as fast as the machine allows.
+- **No rate limit on the API** except on wrong keys. A caller with the key can send as fast as the machine allows. The
+  per-endpoint rate limit protects the *receivers* from Bowler, not Bowler from its callers.
 - **Receivers on a private network cannot be reached** unless the global development flag is turned on, which also removes the SSRF
   protection for everyone. A per-endpoint allow list is not built yet.
 - **One node.** There is no replication. If the disk is lost, the data is lost, so back the file up.

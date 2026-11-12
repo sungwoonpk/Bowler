@@ -12,7 +12,7 @@ import (
 )
 
 const endpointColumns = `id, app_id, url, description, secret, prev_secret, prev_secret_expires_at, event_types,
-	concurrency, disabled_at, disabled_reason, created_at`
+	concurrency, rate_per_second, disabled_at, disabled_reason, created_at`
 
 func scanEndpoint(r scanner) (domain.Endpoint, error) {
 	var (
@@ -22,7 +22,7 @@ func scanEndpoint(r scanner) (domain.Endpoint, error) {
 		created                 int64
 	)
 	if err := r.Scan(&e.ID, &e.AppID, &e.URL, &e.Description, &e.Secret, &prev, &prevExpires, &types,
-		&e.Concurrency, &disabledAt, &reason, &created); err != nil {
+		&e.Concurrency, &e.RatePerSecond, &disabledAt, &reason, &created); err != nil {
 		return domain.Endpoint{}, err
 	}
 	e.PrevSecret = prev.String
@@ -53,7 +53,9 @@ type NewEndpoint struct {
 	Description string
 	EventTypes  []string // nil for every event
 	Concurrency int
-	Secret      string
+	// RatePerSecond is zero for no limit.
+	RatePerSecond int
+	Secret        string
 }
 
 // CreateEndpoint adds an endpoint to an app.
@@ -67,12 +69,12 @@ func (s *Store) CreateEndpoint(ctx context.Context, n NewEndpoint, now time.Time
 	}
 	e := domain.Endpoint{
 		ID: id.New(id.Endpoint), AppID: n.AppID, URL: n.URL, Description: n.Description, EventTypes: n.EventTypes,
-		Concurrency: n.Concurrency, Secret: n.Secret, CreatedAt: now.UTC().Truncate(time.Millisecond),
+		Concurrency: n.Concurrency, RatePerSecond: n.RatePerSecond, Secret: n.Secret, CreatedAt: now.UTC().Truncate(time.Millisecond),
 	}
 	_, err = s.db.ExecContext(ctx,
-		`INSERT INTO endpoints (id, app_id, url, description, secret, event_types, concurrency, created_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		e.ID, e.AppID, e.URL, e.Description, e.Secret, types, e.Concurrency, ms(e.CreatedAt))
+		`INSERT INTO endpoints (id, app_id, url, description, secret, event_types, concurrency, rate_per_second, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		e.ID, e.AppID, e.URL, e.Description, e.Secret, types, e.Concurrency, e.RatePerSecond, ms(e.CreatedAt))
 	return e, err
 }
 
@@ -133,6 +135,8 @@ type EndpointUpdate struct {
 	// EventTypes is a pointer to a list so that "no change" (nil) and "every event" (pointer to nil) differ.
 	EventTypes  **[]string
 	Concurrency *int
+	// RatePerSecond changes the limit. Zero removes it.
+	RatePerSecond *int
 	// Disabled switches the endpoint off or back on. Switching it on clears the reason.
 	Disabled *bool
 }
@@ -165,6 +169,9 @@ func (s *Store) UpdateEndpoint(ctx context.Context, appID, endpointID string, u 
 		if u.Concurrency != nil {
 			e.Concurrency = *u.Concurrency
 		}
+		if u.RatePerSecond != nil {
+			e.RatePerSecond = *u.RatePerSecond
+		}
 		if u.Disabled != nil {
 			if *u.Disabled && e.DisabledAt == nil {
 				t := now.UTC().Truncate(time.Millisecond)
@@ -179,9 +186,9 @@ func (s *Store) UpdateEndpoint(ctx context.Context, appID, endpointID string, u 
 		}
 		reason := sql.NullString{String: e.DisabledReason, Valid: e.DisabledReason != ""}
 		_, err = tx.ExecContext(ctx,
-			`UPDATE endpoints SET url = ?, description = ?, event_types = ?, concurrency = ?, disabled_at = ?, disabled_reason = ?
+			`UPDATE endpoints SET url = ?, description = ?, event_types = ?, concurrency = ?, rate_per_second = ?, disabled_at = ?, disabled_reason = ?
 			 WHERE id = ?`,
-			e.URL, e.Description, types, e.Concurrency, nullMS(e.DisabledAt), reason, e.ID)
+			e.URL, e.Description, types, e.Concurrency, e.RatePerSecond, nullMS(e.DisabledAt), reason, e.ID)
 		out = e
 		return err
 	})

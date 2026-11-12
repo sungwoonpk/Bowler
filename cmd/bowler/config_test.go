@@ -28,6 +28,9 @@ func TestDefaults(t *testing.T) {
 	if c.AllowPrivate || c.AllowHTTP {
 		t.Error("the unsafe options must be off by default")
 	}
+	if c.Retention != 30*24*time.Hour {
+		t.Errorf("finished data should be kept 30 days by default, got %s", c.Retention)
+	}
 	if c.Timeout != 15*time.Second || c.Lease != 60*time.Second || c.Workers != 128 || c.LogFormat != "json" || c.LogLevel != slog.LevelInfo {
 		t.Errorf("%+v", c)
 	}
@@ -91,6 +94,8 @@ func TestBadValuesAreRefusedWithAClearReason(t *testing.T) {
 		"tiny payload limit":     {"-max-payload", "10"},
 		"huge payload limit":     {"-max-payload", "999999999"},
 		"unknown flag":           {"-nope"},
+		"retention too short":    {"-retention", "1h"},
+		"negative retention":     {"-retention", "-24h"},
 	}
 	for name, args := range cases {
 		if _, err := parse(t, args, vars); err == nil {
@@ -114,5 +119,18 @@ func TestLoggerFormats(t *testing.T) {
 	newLogger(config{LogFormat: "json", LogLevel: slog.LevelWarn}, &out).Info("quiet")
 	if out.Len() != 0 {
 		t.Errorf("a message below the level must not be written: %s", out.String())
+	}
+}
+
+func TestRetentionCanBeChangedOrSwitchedOff(t *testing.T) {
+	vars := map[string]string{"BOWLER_API_KEY": goodKey, "BOWLER_RETENTION": "720h"}
+	if c, err := parse(t, nil, vars); err != nil || c.Retention != 720*time.Hour {
+		t.Fatalf("environment should apply: %+v %v", c, err)
+	}
+	if c, err := parse(t, []string{"-retention", "48h"}, vars); err != nil || c.Retention != 48*time.Hour {
+		t.Fatalf("a flag should win: %+v %v", c, err)
+	}
+	if c, err := parse(t, []string{"-retention", "0"}, vars); err != nil || c.Retention != 0 {
+		t.Fatalf("zero keeps everything: %+v %v", c, err)
 	}
 }

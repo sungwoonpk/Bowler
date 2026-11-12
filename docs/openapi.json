@@ -3,7 +3,7 @@
   "info": {
     "title": "Bowler",
     "version": "0.1.0",
-    "description": "Bowler delivers webhooks for a company that wants to send events to its own customers' servers. It signs each one following the Standard Webhooks specification, retries failures on a schedule, never lets one slow receiver hold up the others, and keeps the history of every attempt.\n\n**Vocabulary.** An *app* is one of your own customers. An *endpoint* is a URL that app wants events sent to. A *message* is one event. A *delivery* is one message going to one endpoint, and an *attempt* is one try at a delivery.\n\n**Delivery guarantee.** At least once. A crash or a retry can cause the same message to arrive twice, so a receiver should ignore a `webhook-id` it has already seen. A message is never lost once the API has answered `202`."
+    "description": "Bowler delivers webhooks for a company that wants to send events to its own customers' servers. It signs each one following the Standard Webhooks specification, retries failures on a schedule, never lets one slow receiver hold up the others, and keeps the history of every attempt.\n\n**Vocabulary.** An *app* is one of your own customers. An *endpoint* is a URL that app wants events sent to. A *message* is one event. A *delivery* is one message going to one endpoint, and an *attempt* is one try at a delivery.\n\n**Delivery guarantee.** At least once. A crash or a retry can cause the same message to arrive twice, so a receiver should ignore a `webhook-id` it has already seen. A message is never lost once the API has answered `202`.\n\n**Retention.** Finished messages, with their deliveries and attempts, are deleted after the operator's retention period, 30 days by default. A message that still has work to do is never deleted."
   },
   "servers": [
     {
@@ -306,6 +306,13 @@
                     "maximum": 20,
                     "default": 1,
                     "description": "How many deliveries to this endpoint may be in flight at once."
+                  },
+                  "rate_limit_per_second": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 1000,
+                    "default": 0,
+                    "description": "At most this many attempts start per second on average. 0 means no limit. After a quiet time up to one second's worth may go together."
                   }
                 }
               }
@@ -563,6 +570,12 @@
                     "type": "integer",
                     "minimum": 1,
                     "maximum": 20
+                  },
+                  "rate_limit_per_second": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 1000,
+                    "description": "0 removes the limit."
                   },
                   "disabled": {
                     "type": "boolean"
@@ -1072,7 +1085,7 @@
               "type": "string",
               "maxLength": 255
             },
-            "description": "Send the same key again and you get the original message back, marked with `Idempotent-Replayed: true`, instead of a second send. Use it so that retrying a request whose answer you never received is safe."
+            "description": "Send the same key again and you get the original message back, marked with `Idempotent-Replayed: true`, instead of a second send. Use it so that retrying a request whose answer you never received is safe. A key is remembered as long as its message is kept, which is the retention period (30 days unless the operator changed it). After that the same key is accepted as a new message."
           }
         ],
         "description": "The message is stored and one delivery is created for every endpoint that wants this event type, in one step. The answer is `202`, because delivery happens afterwards.",
@@ -1945,6 +1958,10 @@
           },
           "concurrency": {
             "type": "integer"
+          },
+          "rate_limit_per_second": {
+            "type": "integer",
+            "description": "0 means no limit."
           },
           "disabled_at": {
             "type": "string",

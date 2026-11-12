@@ -21,6 +21,7 @@ import (
 	"github.com/sungwoonpk/bowler/internal/api"
 	"github.com/sungwoonpk/bowler/internal/deliver"
 	"github.com/sungwoonpk/bowler/internal/dispatcher"
+	"github.com/sungwoonpk/bowler/internal/retention"
 	"github.com/sungwoonpk/bowler/internal/ssrf"
 	"github.com/sungwoonpk/bowler/internal/store"
 )
@@ -112,8 +113,17 @@ func serve(ctx context.Context, cfg config) error {
 	if err != nil {
 		return err
 	}
+	var janitor *retention.Janitor
+	var retentionStats func() retention.Stats
+	if cfg.Retention > 0 {
+		janitor, err = retention.New(retention.Config{Store: db, Keep: cfg.Retention, Log: log})
+		if err != nil {
+			return err
+		}
+		retentionStats = janitor.Stats
+	}
 	apiServer, err := api.New(api.Config{
-		Store: db, APIKey: cfg.APIKey, SSRF: policy, Notify: disp.Notify, Stats: disp.Stats,
+		Store: db, APIKey: cfg.APIKey, SSRF: policy, Notify: disp.Notify, Stats: disp.Stats, Retention: retentionStats,
 		MaxPayloadBytes: cfg.MaxPayload, Version: version, Log: log,
 	})
 	if err != nil {
@@ -134,6 +144,14 @@ func serve(ctx context.Context, cfg config) error {
 	go func() {
 		defer close(dispatcherDone)
 		_ = disp.Run(ctx)
+	}()
+
+	janitorDone := make(chan struct{})
+	go func() {
+		defer close(janitorDone)
+		if janitor != nil {
+			janitor.Run(ctx)
+		}
 	}()
 
 	serverErr := make(chan error, 1)
@@ -157,6 +175,7 @@ func serve(ctx context.Context, cfg config) error {
 		log.Warn("the HTTP server did not stop cleanly", "error", err)
 	}
 	<-dispatcherDone // waits for deliveries in progress, up to the drain time
+	<-janitorDone
 	log.Info("stopped")
 	return nil
 }
