@@ -27,8 +27,10 @@ type config struct {
 	MaxPayload   int
 	// Retention is how long finished data is kept. Zero keeps it for ever.
 	Retention time.Duration
-	LogFormat string
-	LogLevel  slog.Level
+	// AuditRetention is how long the audit log is kept. Zero keeps it for ever.
+	AuditRetention time.Duration
+	LogFormat      string
+	LogLevel       slog.Level
 }
 
 const minAPIKey = 24
@@ -74,6 +76,7 @@ func parseServe(args []string, getenv func(string) string, stderr io.Writer) (co
 	fs.DurationVar(&c.Drain, "drain", envDur("BOWLER_DRAIN", 10*time.Second), "how long to let attempts finish on shutdown (BOWLER_DRAIN)")
 	fs.IntVar(&c.MaxPayload, "max-payload", envInt("BOWLER_MAX_PAYLOAD", 256<<10), "largest message payload in bytes (BOWLER_MAX_PAYLOAD)")
 	fs.DurationVar(&c.Retention, "retention", envDur("BOWLER_RETENTION", 30*24*time.Hour), "how long finished messages and their history are kept, 0 to keep for ever (BOWLER_RETENTION)")
+	fs.DurationVar(&c.AuditRetention, "audit-retention", envDur("BOWLER_AUDIT_RETENTION", 365*24*time.Hour), "how long the audit log is kept, 0 to keep for ever (BOWLER_AUDIT_RETENTION)")
 	fs.StringVar(&c.LogFormat, "log-format", envStr("BOWLER_LOG_FORMAT", "json"), "json or text (BOWLER_LOG_FORMAT)")
 	level := fs.String("log-level", envStr("BOWLER_LOG_LEVEL", "info"), "debug, info, warn or error (BOWLER_LOG_LEVEL)")
 	if err := fs.Parse(args); err != nil {
@@ -115,6 +118,9 @@ func parseServe(args []string, getenv func(string) string, stderr io.Writer) (co
 	}
 	if c.Retention != 0 && c.Retention < 24*time.Hour {
 		return c, errors.New("--retention must be 0 to keep for ever, or at least 24h. A shorter time would delete history before a slow retry schedule has finished")
+	}
+	if c.AuditRetention != 0 && c.AuditRetention < 7*24*time.Hour {
+		return c, errors.New("--audit-retention must be 0 to keep for ever, or at least 168h (7 days). A record of who did what is of little use if it is gone within days")
 	}
 	return c, nil
 }

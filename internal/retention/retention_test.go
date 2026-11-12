@@ -56,6 +56,12 @@ func TestNewRefusesSettingsThatCannotWork(t *testing.T) {
 			t.Errorf("Keep %s should be refused", keep)
 		}
 	}
+	if _, err := New(Config{Store: s, Keep: time.Hour, KeepAudit: -time.Hour}); err == nil {
+		t.Error("a negative audit time should be refused")
+	}
+	if _, err := New(Config{Store: s, KeepAudit: time.Hour}); err != nil {
+		t.Errorf("keeping messages for ever while purging the audit log is allowed: %v", err)
+	}
 }
 
 func TestSweepDeletesWhatIsOlderThanKeepAndNothingElse(t *testing.T) {
@@ -143,5 +149,54 @@ func TestSweepCountsAFailure(t *testing.T) {
 	}
 	if j.Stats().Errors != 1 {
 		t.Fatalf("%+v", j.Stats())
+	}
+}
+
+func audit(t *testing.T, s *store.Store, n int, age time.Duration) {
+	t.Helper()
+	for range n {
+		if _, err := s.RecordAudit(context.Background(), domain.AuditEntry{ActorKind: domain.ActorAdmin, ActorID: "admin", Action: "x"}, now.Add(-age)); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func auditCount(t *testing.T, s *store.Store) int {
+	t.Helper()
+	list, _, err := s.ListAudit(context.Background(), store.AuditFilter{}, store.Page{Limit: 250})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return len(list)
+}
+
+func TestTheAuditLogHasItsOwnRetention(t *testing.T) {
+	s, app := newStore(t)
+	oldMessages(t, s, app, 4, 40*24*time.Hour)
+	audit(t, s, 20, 400*24*time.Hour) // older than a year
+	audit(t, s, 3, 100*24*time.Hour)  // older than the messages' retention, younger than the audit log's
+	j, _ := New(Config{Store: s, Keep: 30 * 24 * time.Hour, KeepAudit: 365 * 24 * time.Hour, Batch: 8, Pause: time.Millisecond, Now: func() time.Time { return now }})
+	res, err := j.Sweep(context.Background())
+	if err != nil || res.Messages != 4 || res.AuditEntries != 20 {
+		t.Fatalf("%+v %v", res, err)
+	}
+	if left := auditCount(t, s); left != 3 {
+		t.Fatalf("the audit log outlives the messages: %d left", left)
+	}
+	if st := j.Stats(); st.AuditEntries != 20 || st.Messages != 4 {
+		t.Fatalf("%+v", st)
+	}
+}
+
+func TestMessagesCanBeKeptForEverWhileTheAuditLogIsPurged(t *testing.T) {
+	s, app := newStore(t)
+	oldMessages(t, s, app, 3, 400*24*time.Hour)
+	audit(t, s, 5, 400*24*time.Hour)
+	j, _ := New(Config{Store: s, KeepAudit: 365 * 24 * time.Hour, Now: func() time.Time { return now }})
+	if _, err := j.Sweep(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if messages(t, s, app) != 3 || auditCount(t, s) != 0 {
+		t.Fatalf("messages %d, audit %d", messages(t, s, app), auditCount(t, s))
 	}
 }

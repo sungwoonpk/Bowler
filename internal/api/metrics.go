@@ -45,6 +45,7 @@ func (s *Server) metrics(w http.ResponseWriter, r *http.Request) error {
 		b.WriteString("# HELP bowler_retention_deleted_total Rows deleted because they were older than the retention period.\n# TYPE bowler_retention_deleted_total counter\n")
 		fmt.Fprintf(&b, "bowler_retention_deleted_total{kind=\"messages\"} %d\nbowler_retention_deleted_total{kind=\"deliveries\"} %d\n", st.Messages, st.Deliveries)
 		fmt.Fprintf(&b, "bowler_retention_deleted_total{kind=\"attempts\"} %d\nbowler_retention_deleted_total{kind=\"endpoints\"} %d\n", st.Attempts, st.Endpoints)
+		fmt.Fprintf(&b, "bowler_retention_deleted_total{kind=\"audit_entries\"} %d\n", st.AuditEntries)
 		b.WriteString("# HELP bowler_retention_errors_total Retention sweeps that failed.\n# TYPE bowler_retention_errors_total counter\n")
 		fmt.Fprintf(&b, "bowler_retention_errors_total %d\n", st.Errors)
 	}

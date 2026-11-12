@@ -115,8 +115,8 @@ func serve(ctx context.Context, cfg config) error {
 	}
 	var janitor *retention.Janitor
 	var retentionStats func() retention.Stats
-	if cfg.Retention > 0 {
-		janitor, err = retention.New(retention.Config{Store: db, Keep: cfg.Retention, Log: log})
+	if cfg.Retention > 0 || cfg.AuditRetention > 0 {
+		janitor, err = retention.New(retention.Config{Store: db, Keep: cfg.Retention, KeepAudit: cfg.AuditRetention, Log: log})
 		if err != nil {
 			return err
 		}

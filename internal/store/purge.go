@@ -14,11 +14,14 @@ type PurgeResult struct {
 	Deliveries int
 	Attempts   int
 	Endpoints  int
+	// AuditEntries is filled in by the retention janitor, which purges the audit log separately.
+	AuditEntries int
 }
 
 // Add returns the sum of two results.
 func (r PurgeResult) Add(o PurgeResult) PurgeResult {
-	return PurgeResult{r.Messages + o.Messages, r.Deliveries + o.Deliveries, r.Attempts + o.Attempts, r.Endpoints + o.Endpoints}
+	return PurgeResult{r.Messages + o.Messages, r.Deliveries + o.Deliveries, r.Attempts + o.Attempts, r.Endpoints + o.Endpoints,
+		r.AuditEntries + o.AuditEntries}
 }
 
 // purgeableMessagesSQL picks the oldest messages that are safe to delete: created before the cutoff, with nothing
