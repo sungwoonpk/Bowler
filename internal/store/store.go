@@ -21,6 +21,8 @@ import (
 	"time"
 
 	_ "modernc.org/sqlite" // registers the "sqlite" driver
+
+	"github.com/sungwoonpk/bowler/internal/secretbox"
 )
 
 //go:embed migrations/*.sql
@@ -38,6 +40,9 @@ var (
 // Store is a handle on the database. It is safe for use from many goroutines.
 type Store struct {
 	db *sql.DB
+	// box seals signing secrets before they are written and opens them when they are read. Nil means they are stored as
+	// they are.
+	box *secretbox.Box
 	// writeMu lines up the transactions inside this process. SQLite allows one writer at a time anyway, and
 	// making the goroutines take turns here is cheaper and steadier than letting them all wait on the database
 	// lock together, which under heavy load can run out of patience and fail with SQLITE_BUSY. The database
@@ -45,8 +50,15 @@ type Store struct {
 	writeMu sync.Mutex
 }
 
+// Option changes how a store is opened.
+type Option func(*Store)
+
+// WithSecretBox makes the store encrypt signing secrets at rest. Secrets already in the file are read as they are and
+// are sealed by ResealSecrets.
+func WithSecretBox(b *secretbox.Box) Option { return func(s *Store) { s.box = b } }
+
 // Open opens or creates the database at path and brings its schema up to date.
-func Open(path string) (*Store, error) {
+func Open(path string, opts ...Option) (*Store, error) {
 	q := url.Values{}
 	// busy_timeout makes a writer wait for the lock instead of failing at once.
 	q.Add("_pragma", "busy_timeout(10000)")
@@ -66,6 +78,9 @@ func Open(path string) (*Store, error) {
 	db.SetMaxOpenConns(8)
 	db.SetConnMaxIdleTime(5 * time.Minute)
 	s := &Store{db: db}
+	for _, o := range opts {
+		o(s)
+	}
 	if err := s.migrate(context.Background()); err != nil {
 		_ = db.Close() // the migration error is the one worth reporting
 		return nil, err

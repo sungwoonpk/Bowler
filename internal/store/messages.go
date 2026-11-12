@@ -74,7 +74,7 @@ func (s *Store) CreateMessage(ctx context.Context, n NewMessage, now time.Time) 
 		if err != nil {
 			return err
 		}
-		open, err := collect(rows, scanEndpoint)
+		open, err := collect(rows, s.scanEndpoint)
 		if err != nil {
 			return err
 		}

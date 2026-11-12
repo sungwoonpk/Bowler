@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/sungwoonpk/bowler/internal/domain"
@@ -14,7 +15,22 @@ import (
 const endpointColumns = `id, app_id, url, description, secret, prev_secret, prev_secret_expires_at, event_types,
 	concurrency, rate_per_second, disabled_at, disabled_reason, created_at`
 
-func scanEndpoint(r scanner) (domain.Endpoint, error) {
+// secretAAD names the row and column a sealed secret belongs to, so a sealed value cannot be moved to another place.
+func secretAAD(endpointID, column string) string { return endpointID + ":" + column }
+
+// openSecrets turns the stored secrets of a scanned endpoint into plain ones.
+func (s *Store) openSecrets(e *domain.Endpoint) error {
+	var err error
+	if e.Secret, err = s.box.Open(e.Secret, secretAAD(e.ID, "secret")); err != nil {
+		return fmt.Errorf("store: the signing secret of endpoint %s: %w", e.ID, err)
+	}
+	if e.PrevSecret, err = s.box.Open(e.PrevSecret, secretAAD(e.ID, "prev_secret")); err != nil {
+		return fmt.Errorf("store: the previous signing secret of endpoint %s: %w", e.ID, err)
+	}
+	return nil
+}
+
+func (s *Store) scanEndpoint(r scanner) (domain.Endpoint, error) {
 	var (
 		e                       domain.Endpoint
 		prev, types, reason     sql.NullString
@@ -34,6 +50,9 @@ func scanEndpoint(r scanner) (domain.Endpoint, error) {
 		if err := json.Unmarshal([]byte(types.String), &e.EventTypes); err != nil {
 			return domain.Endpoint{}, err
 		}
+	}
+	if err := s.openSecrets(&e); err != nil {
+		return domain.Endpoint{}, err
 	}
 	return e, nil
 }
@@ -71,16 +90,20 @@ func (s *Store) CreateEndpoint(ctx context.Context, n NewEndpoint, now time.Time
 		ID: id.New(id.Endpoint), AppID: n.AppID, URL: n.URL, Description: n.Description, EventTypes: n.EventTypes,
 		Concurrency: n.Concurrency, RatePerSecond: n.RatePerSecond, Secret: n.Secret, CreatedAt: now.UTC().Truncate(time.Millisecond),
 	}
+	sealed, err := s.box.Seal(e.Secret, secretAAD(e.ID, "secret"))
+	if err != nil {
+		return domain.Endpoint{}, err
+	}
 	_, err = s.db.ExecContext(ctx,
 		`INSERT INTO endpoints (id, app_id, url, description, secret, event_types, concurrency, rate_per_second, created_at)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		e.ID, e.AppID, e.URL, e.Description, e.Secret, types, e.Concurrency, e.RatePerSecond, ms(e.CreatedAt))
+		e.ID, e.AppID, e.URL, e.Description, sealed, types, e.Concurrency, e.RatePerSecond, ms(e.CreatedAt))
 	return e, err
 }
 
 // GetEndpoint returns one endpoint of an app. A deleted endpoint is not found.
 func (s *Store) GetEndpoint(ctx context.Context, appID, endpointID string) (domain.Endpoint, error) {
-	e, err := scanEndpoint(s.db.QueryRowContext(ctx,
+	e, err := s.scanEndpoint(s.db.QueryRowContext(ctx,
 		"SELECT "+endpointColumns+" FROM endpoints WHERE id = ? AND app_id = ? AND deleted_at IS NULL", endpointID, appID))
 	if errors.Is(err, sql.ErrNoRows) {
 		return domain.Endpoint{}, ErrNotFound
@@ -110,7 +133,7 @@ func (s *Store) ListEndpoints(ctx context.Context, appID string, p Page) ([]doma
 	defer rows.Close()
 	var out []domain.Endpoint
 	for rows.Next() {
-		e, err := scanEndpoint(rows)
+		e, err := s.scanEndpoint(rows)
 		if err != nil {
 			return nil, "", err
 		}
@@ -145,7 +168,7 @@ type EndpointUpdate struct {
 func (s *Store) UpdateEndpoint(ctx context.Context, appID, endpointID string, u EndpointUpdate, now time.Time) (domain.Endpoint, error) {
 	var out domain.Endpoint
 	err := s.withTx(ctx, func(tx *sql.Tx) error {
-		e, err := scanEndpoint(tx.QueryRowContext(ctx,
+		e, err := s.scanEndpoint(tx.QueryRowContext(ctx,
 			"SELECT "+endpointColumns+" FROM endpoints WHERE id = ? AND app_id = ? AND deleted_at IS NULL", endpointID, appID))
 		if errors.Is(err, sql.ErrNoRows) {
 			return ErrNotFound
@@ -218,7 +241,7 @@ func (s *Store) DeleteEndpoint(ctx context.Context, appID, endpointID string, no
 func (s *Store) RotateSecret(ctx context.Context, appID, endpointID, newSecret string, graceUntil time.Time) (domain.Endpoint, error) {
 	var out domain.Endpoint
 	err := s.withTx(ctx, func(tx *sql.Tx) error {
-		e, err := scanEndpoint(tx.QueryRowContext(ctx,
+		e, err := s.scanEndpoint(tx.QueryRowContext(ctx,
 			"SELECT "+endpointColumns+" FROM endpoints WHERE id = ? AND app_id = ? AND deleted_at IS NULL", endpointID, appID))
 		if errors.Is(err, sql.ErrNoRows) {
 			return ErrNotFound
@@ -226,8 +249,16 @@ func (s *Store) RotateSecret(ctx context.Context, appID, endpointID, newSecret s
 		if err != nil {
 			return err
 		}
+		sealedNew, err := s.box.Seal(newSecret, secretAAD(e.ID, "secret"))
+		if err != nil {
+			return err
+		}
+		sealedOld, err := s.box.Seal(e.Secret, secretAAD(e.ID, "prev_secret"))
+		if err != nil {
+			return err
+		}
 		_, err = tx.ExecContext(ctx, "UPDATE endpoints SET secret = ?, prev_secret = ?, prev_secret_expires_at = ? WHERE id = ?",
-			newSecret, e.Secret, ms(graceUntil), e.ID)
+			sealedNew, sealedOld, ms(graceUntil), e.ID)
 		e.PrevSecret, e.Secret = e.Secret, newSecret
 		g := graceUntil.UTC()
 		e.PrevSecretExpiresAt = &g
