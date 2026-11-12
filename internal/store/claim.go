@@ -211,6 +211,11 @@ func (s *Store) Complete(ctx context.Context, c Completion) error {
 	lost := false
 	err := s.withTx(ctx, func(tx *sql.Tx) error {
 		a := c.Attempt
+		// An attempt without a trigger would break a constraint and leave the delivery stuck until its lease ran out.
+		// Scheduled is the safe default.
+		if a.Trigger == "" {
+			a.Trigger = domain.Scheduled
+		}
 		_, err := tx.ExecContext(ctx,
 			`INSERT INTO attempts (id, delivery_id, started_at, duration_ms, status_code, failure, response_snippet, trigger)
 			 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,

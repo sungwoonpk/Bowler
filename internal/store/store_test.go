@@ -688,3 +688,22 @@ func TestListingMessagesAndDeliveries(t *testing.T) {
 		t.Fatalf("counts: %v %v", counts, err)
 	}
 }
+
+func TestAnAttemptWithoutATriggerIsStillRecorded(t *testing.T) {
+	w := newWorld(t)
+	w.endpoint(t, "https://a.example/hook", nil, 1)
+	_, ds := w.send(t, "x", t0)
+	w.s.ClaimDue(ctx(), t0, time.Minute, "w", 1)
+	err := w.s.Complete(ctx(), Completion{DeliveryID: ds[0].ID, Owner: "w", Result: ResultSucceeded, Now: t0,
+		Attempt: domain.Attempt{StartedAt: t0, StatusCode: 200}})
+	if err != nil {
+		t.Fatalf("a missing trigger must not stop the result from being recorded: %v", err)
+	}
+	as, _ := w.s.ListAttempts(ctx(), w.app.ID, ds[0].ID)
+	if len(as) != 1 || as[0].Trigger != domain.Scheduled {
+		t.Fatalf("it should default to scheduled: %+v", as)
+	}
+	if d, _ := w.s.GetDelivery(ctx(), w.app.ID, ds[0].ID); d.State != domain.Succeeded {
+		t.Fatalf("state = %s", d.State)
+	}
+}
