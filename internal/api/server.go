@@ -6,9 +6,11 @@ import (
 	"log/slog"
 	"net/http"
 	"sort"
+	"sync/atomic"
 	"time"
 
 	"github.com/sungwoonpk/bowler/internal/dispatcher"
+	"github.com/sungwoonpk/bowler/internal/domain"
 	"github.com/sungwoonpk/bowler/internal/retention"
 	"github.com/sungwoonpk/bowler/internal/ssrf"
 	"github.com/sungwoonpk/bowler/internal/store"
@@ -39,19 +41,23 @@ type Config struct {
 
 // Server is the HTTP interface.
 type Server struct {
-	store      *store.Store
-	apiKey     string
-	policy     ssrf.Policy
-	notify     func()
-	stats      func() dispatcher.Stats
-	retention  func() retention.Stats
-	maxPayload int
-	version    string
-	now        func() time.Time
-	log        *slog.Logger
-	failures   *failureTracker
-	mux        *http.ServeMux
-	registered []string // "METHOD /path" for every route, so a test can compare them with the OpenAPI file
+	store     *store.Store
+	apiKey    string
+	policy    ssrf.Policy
+	notify    func()
+	stats     func() dispatcher.Stats
+	retention func() retention.Stats
+	// auditErrors counts audit entries that could not be recorded.
+	auditErrors atomic.Uint64
+	// recordAudit writes one audit entry. It is the store's, and a test replaces it to see what a failure does.
+	recordAudit func(context.Context, domain.AuditEntry, time.Time) (domain.AuditEntry, error)
+	maxPayload  int
+	version     string
+	now         func() time.Time
+	log         *slog.Logger
+	failures    *failureTracker
+	mux         *http.ServeMux
+	registered  []string // "METHOD /path" for every route, so a test can compare them with the OpenAPI file
 }
 
 // New builds the server. It refuses a configuration that would leave the API unprotected.
@@ -79,6 +85,7 @@ func New(cfg Config) (*Server, error) {
 	if s.notify == nil {
 		s.notify = func() {}
 	}
+	s.recordAudit = cfg.Store.RecordAudit
 	s.routes()
 	return s, nil
 }
@@ -128,14 +135,27 @@ func (s *Server) routes() {
 		s.registered = append(s.registered, pattern)
 		s.mux.HandleFunc(pattern, s.wrap(s.auth(h)))
 	}
+	// adminOnly routes are for the operator's key alone. protected ones also take a token, but only for its own app:
+	// every handler that has {app} in its path goes through s.app, which enforces that.
+	adminOnly := func(pattern string, h handler) {
+		s.registered = append(s.registered, pattern)
+		s.mux.HandleFunc(pattern, s.wrap(s.adminOnly(h)))
+	}
 	public := func(pattern string, h http.HandlerFunc) {
 		s.registered = append(s.registered, pattern)
 		s.mux.HandleFunc(pattern, h)
 	}
 
-	protected("POST /v1/apps", s.createApp)
-	protected("GET /v1/apps", s.listApps)
+	adminOnly("POST /v1/apps", s.createApp)
+	adminOnly("GET /v1/apps", s.listApps)
 	protected("GET /v1/apps/{app}", s.getApp)
+
+	adminOnly("POST /v1/apps/{app}/tokens", s.createToken)
+	adminOnly("GET /v1/apps/{app}/tokens", s.listTokens)
+	adminOnly("DELETE /v1/apps/{app}/tokens/{token}", s.revokeToken)
+
+	protected("GET /v1/apps/{app}/audit-log", s.listAppAudit)
+	adminOnly("GET /v1/audit-log", s.listAudit)
 
 	protected("POST /v1/apps/{app}/endpoints", s.createEndpoint)
 	protected("GET /v1/apps/{app}/endpoints", s.listEndpoints)
@@ -156,7 +176,7 @@ func (s *Server) routes() {
 	protected("GET /v1/apps/{app}/deliveries/{delivery}/attempts", s.listAttempts)
 	protected("POST /v1/apps/{app}/deliveries/{delivery}/replay", s.replayDelivery)
 
-	protected("GET /metrics", s.metrics)
+	adminOnly("GET /metrics", s.metrics)
 	public("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})

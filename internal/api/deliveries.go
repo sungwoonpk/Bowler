@@ -61,6 +61,7 @@ func (s *Server) replayDelivery(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 	s.notify()
+	s.audit(w, r, app.ID, "delivery.replay", "delivery", d.ID, nil)
 	writeJSON(w, http.StatusAccepted, d)
 	return nil
 }

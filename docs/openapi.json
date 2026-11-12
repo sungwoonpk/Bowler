@@ -3,7 +3,7 @@
   "info": {
     "title": "Bowler",
     "version": "0.1.0",
-    "description": "Bowler delivers webhooks for a company that wants to send events to its own customers' servers. It signs each one following the Standard Webhooks specification, retries failures on a schedule, never lets one slow receiver hold up the others, and keeps the history of every attempt.\n\n**Vocabulary.** An *app* is one of your own customers. An *endpoint* is a URL that app wants events sent to. A *message* is one event. A *delivery* is one message going to one endpoint, and an *attempt* is one try at a delivery.\n\n**Delivery guarantee.** At least once. A crash or a retry can cause the same message to arrive twice, so a receiver should ignore a `webhook-id` it has already seen. A message is never lost once the API has answered `202`.\n\n**Retention.** Finished messages, with their deliveries and attempts, are deleted after the operator's retention period, 30 days by default. A message that still has work to do is never deleted."
+    "description": "Bowler delivers webhooks for a company that wants to send events to its own customers' servers. It signs each one following the Standard Webhooks specification, retries failures on a schedule, never lets one slow receiver hold up the others, and keeps the history of every attempt.\n\n**Vocabulary.** An *app* is one of your own customers. An *endpoint* is a URL that app wants events sent to. A *message* is one event. A *delivery* is one message going to one endpoint, and an *attempt* is one try at a delivery.\n\n**Delivery guarantee.** At least once. A crash or a retry can cause the same message to arrive twice, so a receiver should ignore a `webhook-id` it has already seen. A message is never lost once the API has answered `202`.\n\n**Retention.** Finished messages, with their deliveries and attempts, are deleted after the operator's retention period, 30 days by default. A message that still has work to do is never deleted.\n\n**Credentials.** The operator's API key can do everything. An app's own side can be given a *token* instead, made with `POST /v1/apps/{app}/tokens`: it works on that app only, and another app looks the same as one that does not exist. The routes that make apps and tokens, and the metrics, take the operator's key only.\n\n**Audit log.** Changes to endpoints and tokens, and every read or rotation of a signing secret, are recorded with who did them. See `GET /v1/apps/{app}/audit-log`."
   },
   "servers": [
     {
@@ -13,6 +13,9 @@
   "security": [
     {
       "apiKey": []
+    },
+    {
+      "appToken": []
     }
   ],
   "tags": [
@@ -31,6 +34,14 @@
     {
       "name": "Operations",
       "description": "Health and metrics."
+    },
+    {
+      "name": "Tokens",
+      "description": "Credentials that act on one app only. Operator's key only."
+    },
+    {
+      "name": "Audit log",
+      "description": "Who did what."
     }
   ],
   "paths": {
@@ -78,7 +89,7 @@
             }
           },
           "401": {
-            "description": "The API key is missing or wrong.",
+            "description": "The API key or token is missing, wrong or revoked.",
             "content": {
               "application/json": {
                 "schema": {
@@ -88,7 +99,7 @@
             }
           },
           "429": {
-            "description": "Too many wrong API keys were sent from this address. Try again after the time in `Retry-After`.",
+            "description": "Too many wrong API keys or tokens were sent from this address. Try again after the time in `Retry-After`.",
             "content": {
               "application/json": {
                 "schema": {
@@ -116,8 +127,23 @@
                 }
               }
             }
+          },
+          "403": {
+            "description": "This credential may not do this. The route is for the operator's API key only.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           }
-        }
+        },
+        "security": [
+          {
+            "apiKey": []
+          }
+        ]
       },
       "get": {
         "tags": [
@@ -145,7 +171,7 @@
             }
           },
           "401": {
-            "description": "The API key is missing or wrong.",
+            "description": "The API key or token is missing, wrong or revoked.",
             "content": {
               "application/json": {
                 "schema": {
@@ -155,7 +181,7 @@
             }
           },
           "429": {
-            "description": "Too many wrong API keys were sent from this address. Try again after the time in `Retry-After`.",
+            "description": "Too many wrong API keys or tokens were sent from this address. Try again after the time in `Retry-After`.",
             "content": {
               "application/json": {
                 "schema": {
@@ -188,8 +214,23 @@
                 }
               }
             }
+          },
+          "403": {
+            "description": "This credential may not do this. The route is for the operator's API key only.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           }
-        }
+        },
+        "security": [
+          {
+            "apiKey": []
+          }
+        ]
       }
     },
     "/v1/apps/{app}": {
@@ -216,7 +257,7 @@
             }
           },
           "401": {
-            "description": "The API key is missing or wrong.",
+            "description": "The API key or token is missing, wrong or revoked.",
             "content": {
               "application/json": {
                 "schema": {
@@ -226,7 +267,7 @@
             }
           },
           "429": {
-            "description": "Too many wrong API keys were sent from this address. Try again after the time in `Retry-After`.",
+            "description": "Too many wrong API keys or tokens were sent from this address. Try again after the time in `Retry-After`.",
             "content": {
               "application/json": {
                 "schema": {
@@ -331,7 +372,7 @@
             }
           },
           "401": {
-            "description": "The API key is missing or wrong.",
+            "description": "The API key or token is missing, wrong or revoked.",
             "content": {
               "application/json": {
                 "schema": {
@@ -341,7 +382,7 @@
             }
           },
           "429": {
-            "description": "Too many wrong API keys were sent from this address. Try again after the time in `Retry-After`.",
+            "description": "Too many wrong API keys or tokens were sent from this address. Try again after the time in `Retry-After`.",
             "content": {
               "application/json": {
                 "schema": {
@@ -401,7 +442,7 @@
             }
           },
           "401": {
-            "description": "The API key is missing or wrong.",
+            "description": "The API key or token is missing, wrong or revoked.",
             "content": {
               "application/json": {
                 "schema": {
@@ -411,7 +452,7 @@
             }
           },
           "429": {
-            "description": "Too many wrong API keys were sent from this address. Try again after the time in `Retry-After`.",
+            "description": "Too many wrong API keys or tokens were sent from this address. Try again after the time in `Retry-After`.",
             "content": {
               "application/json": {
                 "schema": {
@@ -485,7 +526,7 @@
             }
           },
           "401": {
-            "description": "The API key is missing or wrong.",
+            "description": "The API key or token is missing, wrong or revoked.",
             "content": {
               "application/json": {
                 "schema": {
@@ -495,7 +536,7 @@
             }
           },
           "429": {
-            "description": "Too many wrong API keys were sent from this address. Try again after the time in `Retry-After`.",
+            "description": "Too many wrong API keys or tokens were sent from this address. Try again after the time in `Retry-After`.",
             "content": {
               "application/json": {
                 "schema": {
@@ -597,7 +638,7 @@
             }
           },
           "401": {
-            "description": "The API key is missing or wrong.",
+            "description": "The API key or token is missing, wrong or revoked.",
             "content": {
               "application/json": {
                 "schema": {
@@ -607,7 +648,7 @@
             }
           },
           "429": {
-            "description": "Too many wrong API keys were sent from this address. Try again after the time in `Retry-After`.",
+            "description": "Too many wrong API keys or tokens were sent from this address. Try again after the time in `Retry-After`.",
             "content": {
               "application/json": {
                 "schema": {
@@ -665,7 +706,7 @@
             }
           },
           "401": {
-            "description": "The API key is missing or wrong.",
+            "description": "The API key or token is missing, wrong or revoked.",
             "content": {
               "application/json": {
                 "schema": {
@@ -675,7 +716,7 @@
             }
           },
           "429": {
-            "description": "Too many wrong API keys were sent from this address. Try again after the time in `Retry-After`.",
+            "description": "Too many wrong API keys or tokens were sent from this address. Try again after the time in `Retry-After`.",
             "content": {
               "application/json": {
                 "schema": {
@@ -727,7 +768,7 @@
             }
           },
           "401": {
-            "description": "The API key is missing or wrong.",
+            "description": "The API key or token is missing, wrong or revoked.",
             "content": {
               "application/json": {
                 "schema": {
@@ -737,7 +778,7 @@
             }
           },
           "429": {
-            "description": "Too many wrong API keys were sent from this address. Try again after the time in `Retry-After`.",
+            "description": "Too many wrong API keys or tokens were sent from this address. Try again after the time in `Retry-After`.",
             "content": {
               "application/json": {
                 "schema": {
@@ -822,7 +863,7 @@
             }
           },
           "401": {
-            "description": "The API key is missing or wrong.",
+            "description": "The API key or token is missing, wrong or revoked.",
             "content": {
               "application/json": {
                 "schema": {
@@ -832,7 +873,7 @@
             }
           },
           "429": {
-            "description": "Too many wrong API keys were sent from this address. Try again after the time in `Retry-After`.",
+            "description": "Too many wrong API keys or tokens were sent from this address. Try again after the time in `Retry-After`.",
             "content": {
               "application/json": {
                 "schema": {
@@ -919,7 +960,7 @@
             }
           },
           "401": {
-            "description": "The API key is missing or wrong.",
+            "description": "The API key or token is missing, wrong or revoked.",
             "content": {
               "application/json": {
                 "schema": {
@@ -929,7 +970,7 @@
             }
           },
           "429": {
-            "description": "Too many wrong API keys were sent from this address. Try again after the time in `Retry-After`.",
+            "description": "Too many wrong API keys or tokens were sent from this address. Try again after the time in `Retry-After`.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1010,7 +1051,7 @@
             }
           },
           "401": {
-            "description": "The API key is missing or wrong.",
+            "description": "The API key or token is missing, wrong or revoked.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1020,7 +1061,7 @@
             }
           },
           "429": {
-            "description": "Too many wrong API keys were sent from this address. Try again after the time in `Retry-After`.",
+            "description": "Too many wrong API keys or tokens were sent from this address. Try again after the time in `Retry-After`.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1126,7 +1167,7 @@
             }
           },
           "401": {
-            "description": "The API key is missing or wrong.",
+            "description": "The API key or token is missing, wrong or revoked.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1136,7 +1177,7 @@
             }
           },
           "429": {
-            "description": "Too many wrong API keys were sent from this address. Try again after the time in `Retry-After`.",
+            "description": "Too many wrong API keys or tokens were sent from this address. Try again after the time in `Retry-After`.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1213,7 +1254,7 @@
             }
           },
           "401": {
-            "description": "The API key is missing or wrong.",
+            "description": "The API key or token is missing, wrong or revoked.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1223,7 +1264,7 @@
             }
           },
           "429": {
-            "description": "Too many wrong API keys were sent from this address. Try again after the time in `Retry-After`.",
+            "description": "Too many wrong API keys or tokens were sent from this address. Try again after the time in `Retry-After`.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1297,7 +1338,7 @@
             }
           },
           "401": {
-            "description": "The API key is missing or wrong.",
+            "description": "The API key or token is missing, wrong or revoked.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1307,7 +1348,7 @@
             }
           },
           "429": {
-            "description": "Too many wrong API keys were sent from this address. Try again after the time in `Retry-After`.",
+            "description": "Too many wrong API keys or tokens were sent from this address. Try again after the time in `Retry-After`.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1366,7 +1407,7 @@
             }
           },
           "401": {
-            "description": "The API key is missing or wrong.",
+            "description": "The API key or token is missing, wrong or revoked.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1376,7 +1417,7 @@
             }
           },
           "429": {
-            "description": "Too many wrong API keys were sent from this address. Try again after the time in `Retry-After`.",
+            "description": "Too many wrong API keys or tokens were sent from this address. Try again after the time in `Retry-After`.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1450,7 +1491,7 @@
             }
           },
           "401": {
-            "description": "The API key is missing or wrong.",
+            "description": "The API key or token is missing, wrong or revoked.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1460,7 +1501,7 @@
             }
           },
           "429": {
-            "description": "Too many wrong API keys were sent from this address. Try again after the time in `Retry-After`.",
+            "description": "Too many wrong API keys or tokens were sent from this address. Try again after the time in `Retry-After`.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1519,7 +1560,7 @@
             }
           },
           "401": {
-            "description": "The API key is missing or wrong.",
+            "description": "The API key or token is missing, wrong or revoked.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1529,7 +1570,7 @@
             }
           },
           "429": {
-            "description": "Too many wrong API keys were sent from this address. Try again after the time in `Retry-After`.",
+            "description": "Too many wrong API keys or tokens were sent from this address. Try again after the time in `Retry-After`.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1604,7 +1645,7 @@
             }
           },
           "401": {
-            "description": "The API key is missing or wrong.",
+            "description": "The API key or token is missing, wrong or revoked.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1614,7 +1655,7 @@
             }
           },
           "429": {
-            "description": "Too many wrong API keys were sent from this address. Try again after the time in `Retry-After`.",
+            "description": "Too many wrong API keys or tokens were sent from this address. Try again after the time in `Retry-After`.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1675,7 +1716,7 @@
             }
           },
           "401": {
-            "description": "The API key is missing or wrong.",
+            "description": "The API key or token is missing, wrong or revoked.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1685,7 +1726,7 @@
             }
           },
           "429": {
-            "description": "Too many wrong API keys were sent from this address. Try again after the time in `Retry-After`.",
+            "description": "Too many wrong API keys or tokens were sent from this address. Try again after the time in `Retry-After`.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1703,8 +1744,23 @@
                 }
               }
             }
+          },
+          "403": {
+            "description": "This credential may not do this. The route is for the operator's API key only.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           }
-        }
+        },
+        "security": [
+          {
+            "apiKey": []
+          }
+        ]
       }
     },
     "/healthz": {
@@ -1772,6 +1828,518 @@
           }
         }
       }
+    },
+    "/v1/apps/{app}/tokens": {
+      "post": {
+        "tags": [
+          "Tokens"
+        ],
+        "summary": "Make a token for an app",
+        "operationId": "createToken",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/app"
+          }
+        ],
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "description": "Returns the token once. It is not stored and cannot be read again, so if it is lost, revoke it and make another. An app may hold 50 working tokens.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "name"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "maxLength": 100,
+                    "description": "What the token is for, so it can be told apart and revoked later."
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "400": {
+            "description": "The request is not valid.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "The API key or token is missing, wrong or revoked.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "This credential may not do this. The route is for the operator's API key only.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "There is no such resource, or it belongs to another app.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "A resource with this identifier already exists, or the state does not allow this.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many wrong API keys or tokens were sent from this address. Try again after the time in `Retry-After`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "Created. The `token` field is the only time the token is shown.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AppTokenWithSecret"
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "tags": [
+          "Tokens"
+        ],
+        "summary": "List an app's tokens, newest first",
+        "operationId": "listTokens",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/app"
+          },
+          {
+            "$ref": "#/components/parameters/limit"
+          },
+          {
+            "$ref": "#/components/parameters/cursor"
+          }
+        ],
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "description": "Revoked tokens are included, so the history stays readable. The tokens themselves are never shown.",
+        "responses": {
+          "400": {
+            "description": "The request is not valid.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "The API key or token is missing, wrong or revoked.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "This credential may not do this. The route is for the operator's API key only.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "There is no such resource, or it belongs to another app.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many wrong API keys or tokens were sent from this address. Try again after the time in `Retry-After`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "A page of tokens.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "data"
+                  ],
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/AppToken"
+                      }
+                    },
+                    "next_cursor": {
+                      "type": "string",
+                      "description": "Pass this as `cursor` to get the next page. Absent on the last page."
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/apps/{app}/tokens/{token}": {
+      "delete": {
+        "tags": [
+          "Tokens"
+        ],
+        "summary": "Revoke a token",
+        "operationId": "revokeToken",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/app"
+          },
+          {
+            "$ref": "#/components/parameters/token"
+          }
+        ],
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "description": "The token stops working at once. Revoking one that is already revoked changes nothing, so it is safe to repeat.",
+        "responses": {
+          "400": {
+            "description": "The request is not valid.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "The API key or token is missing, wrong or revoked.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "This credential may not do this. The route is for the operator's API key only.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "There is no such resource, or it belongs to another app.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many wrong API keys or tokens were sent from this address. Try again after the time in `Retry-After`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "The token, now revoked.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AppToken"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/apps/{app}/audit-log": {
+      "get": {
+        "tags": [
+          "Audit log"
+        ],
+        "summary": "List what was done to an app, newest first",
+        "operationId": "listAppAuditLog",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/app"
+          },
+          {
+            "name": "action",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "maxLength": 64
+            },
+            "description": "Only entries with this action."
+          },
+          {
+            "$ref": "#/components/parameters/limit"
+          },
+          {
+            "$ref": "#/components/parameters/cursor"
+          }
+        ],
+        "description": "Covers changes to endpoints and tokens, reading and rotating signing secrets, replays and recoveries. Sending a message is not in it, since a message is its own record. An app's token can read its own app's log.",
+        "responses": {
+          "400": {
+            "description": "The request is not valid.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "The API key or token is missing, wrong or revoked.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "There is no such resource, or it belongs to another app.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many wrong API keys or tokens were sent from this address. Try again after the time in `Retry-After`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "A page of entries.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "data"
+                  ],
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/AuditEntry"
+                      }
+                    },
+                    "next_cursor": {
+                      "type": "string",
+                      "description": "Pass this as `cursor` to get the next page. Absent on the last page."
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/audit-log": {
+      "get": {
+        "tags": [
+          "Audit log"
+        ],
+        "summary": "List what was done to every app, newest first",
+        "operationId": "listAuditLog",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "app",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Only this app, by id or `uid`."
+          },
+          {
+            "name": "action",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "maxLength": 64
+            },
+            "description": "Only entries with this action."
+          },
+          {
+            "$ref": "#/components/parameters/limit"
+          },
+          {
+            "$ref": "#/components/parameters/cursor"
+          }
+        ],
+        "responses": {
+          "400": {
+            "description": "The request is not valid.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "The API key or token is missing, wrong or revoked.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "This credential may not do this. The route is for the operator's API key only.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "There is no such resource, or it belongs to another app.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many wrong API keys or tokens were sent from this address. Try again after the time in `Retry-After`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "A page of entries.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "data"
+                  ],
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/AuditEntry"
+                      }
+                    },
+                    "next_cursor": {
+                      "type": "string",
+                      "description": "Pass this as `cursor` to get the next page. Absent on the last page."
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "webhooks": {
@@ -1832,7 +2400,12 @@
       "apiKey": {
         "type": "http",
         "scheme": "bearer",
-        "description": "The key set in `BOWLER_API_KEY`. Anyone who has it can read and change everything."
+        "description": "The key set in `BOWLER_API_KEY`. Anyone who has it can read and change everything, including the tokens of every app."
+      },
+      "appToken": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "A token made for one app with `POST /v1/apps/{app}/tokens`. It starts with `bwl_` and works on that app's routes only: its endpoints, messages, deliveries and audit log. It cannot make apps or tokens, read metrics or see another app, and another app looks the same as one that does not exist. Safe to give to that app's own side, such as a settings page for its customers."
       }
     },
     "parameters": {
@@ -1889,6 +2462,15 @@
           "type": "string"
         },
         "description": "The `next_cursor` of the previous page."
+      },
+      "token": {
+        "name": "token",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string",
+          "pattern": "^tok_[a-z2-7]{20}$"
+        }
       }
     },
     "schemas": {
@@ -2146,6 +2728,97 @@
               "scheduled",
               "manual"
             ]
+          }
+        }
+      },
+      "AppToken": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "example": "tok_k3j9x2m4n5p6q7r8s2t3"
+          },
+          "app_id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "prefix": {
+            "type": "string",
+            "example": "bwl_abc234",
+            "description": "The first characters of the token, to tell tokens apart. Not enough to use it."
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "revoked_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Present once the token has been revoked."
+          }
+        }
+      },
+      "AppTokenWithSecret": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/AppToken"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "token": {
+                "type": "string",
+                "description": "The token itself. Shown once, here, and never again: only a hash is kept. Store it now."
+              }
+            }
+          }
+        ]
+      },
+      "AuditEntry": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "example": "aud_k3j9x2m4n5p6q7r8s2t3"
+          },
+          "at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "actor_kind": {
+            "type": "string",
+            "enum": [
+              "admin",
+              "app_token"
+            ]
+          },
+          "actor_id": {
+            "type": "string",
+            "description": "`admin` for the operator's key, or the id of the token."
+          },
+          "app_id": {
+            "type": "string"
+          },
+          "action": {
+            "type": "string",
+            "example": "endpoint.update",
+            "description": "One of: app.create, token.create, token.revoke, endpoint.create, endpoint.update, endpoint.delete, endpoint.secret_read, endpoint.secret_rotate, endpoint.recover, delivery.replay."
+          },
+          "resource_kind": {
+            "type": "string"
+          },
+          "resource_id": {
+            "type": "string"
+          },
+          "detail": {
+            "type": "object",
+            "description": "A little about what happened. For an update, the names of the fields changed, never their values. Never a secret, token or payload."
+          },
+          "request_id": {
+            "type": "string",
+            "description": "The `X-Request-ID` of the request, to connect an entry to the server log."
           }
         }
       }

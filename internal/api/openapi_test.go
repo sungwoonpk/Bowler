@@ -92,7 +92,7 @@ func TestSecurityInTheSpecMatchesWhatTheServerEnforces(t *testing.T) {
 	for path, item := range s.Paths {
 		for method, op := range item {
 			public := op.Security != nil && len(*op.Security) == 0
-			url := h.srv.URL + strings.NewReplacer("{app}", "x", "{endpoint}", "ep_aaaaaaaaaaaaaaaaaaaa", "{message}", "msg_aaaaaaaaaaaaaaaaaaaa", "{delivery}", "dlv_aaaaaaaaaaaaaaaaaaaa").Replace(path)
+			url := h.srv.URL + strings.NewReplacer("{app}", "x", "{endpoint}", "ep_aaaaaaaaaaaaaaaaaaaa", "{message}", "msg_aaaaaaaaaaaaaaaaaaaa", "{delivery}", "dlv_aaaaaaaaaaaaaaaaaaaa", "{token}", "tok_aaaaaaaaaaaaaaaaaaaa").Replace(path)
 			req, _ := http.NewRequest(strings.ToUpper(method), url, nil) // no key
 			resp, err := http.DefaultClient.Do(req)
 			if err != nil {
@@ -200,5 +200,48 @@ func TestTheDocumentedWebhookHeadersAreTheOnesThatAreSent(t *testing.T) {
 	}
 	if len(got) != 3 {
 		t.Errorf("the spec lists headers the code does not send: %v", got)
+	}
+}
+
+// The spec says, route by route, whether a token is accepted. The server must do what it says.
+func TestTheSpecSaysWhichRoutesTakeATokenAndTheServerAgrees(t *testing.T) {
+	s, _ := loadSpec(t)
+	h := newHarness(t, func(c *setup) { c.noWorker = true })
+	app := h.app("a")
+	tok, _ := h.token(app, "portal")
+	fill := strings.NewReplacer("{app}", app, "{endpoint}", "ep_aaaaaaaaaaaaaaaaaaaa", "{message}", "msg_aaaaaaaaaaaaaaaaaaaa",
+		"{delivery}", "dlv_aaaaaaaaaaaaaaaaaaaa", "{token}", "tok_aaaaaaaaaaaaaaaaaaaa")
+	checked := 0
+	for path, item := range s.Paths {
+		for method, op := range item {
+			if op.Security != nil && len(*op.Security) == 0 {
+				continue // public
+			}
+			operatorOnly := false
+			if op.Security != nil {
+				operatorOnly = true
+				for _, req := range *op.Security {
+					if _, takesToken := req["appToken"]; takesToken {
+						operatorOnly = false
+					}
+				}
+			}
+			var body any
+			if m := strings.ToUpper(method); m == "POST" || m == "PATCH" {
+				body = map[string]any{}
+			}
+			r := h.do(strings.ToUpper(method), fill.Replace(path), body, bearer(tok)...)
+			label := strings.ToUpper(method) + " " + path
+			if operatorOnly && r.status != 403 {
+				t.Errorf("%s is documented as the operator's key only, but a token got %d", label, r.status)
+			}
+			if !operatorOnly && (r.status == 403 || r.status == 401) {
+				t.Errorf("%s is documented as taking a token, but a token got %d", label, r.status)
+			}
+			checked++
+		}
+	}
+	if checked < 20 {
+		t.Fatalf("only %d operations were checked", checked)
 	}
 }

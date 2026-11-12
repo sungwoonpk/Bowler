@@ -9,6 +9,8 @@ someone deciding whether to trust the service, so the gaps are listed as plainly
 | ------------------------------------ | --------------------------------------------------------------------------------------- |
 | The machine Bowler runs on           | Bowler makes requests to addresses its users choose, so it can be turned into a weapon  |
 | The API key                          | It can read and change everything                                                       |
+| App tokens                           | Each has the whole authority of one app, and a leaked one lets someone act as that app  |
+| The audit log                        | It is the record of who did what, so it must be complete and must not hold secrets      |
 | Endpoint signing secrets             | Anyone who has one can forge webhooks to that endpoint                                  |
 | Message payloads                     | They often carry customer data: names, amounts, addresses                               |
 | Delivery history                     | It shows what each receiver was sent and what it answered                               |
@@ -41,6 +43,11 @@ someone deciding whether to trust the service, so the gaps are listed as plainly
 | A receiver asking for an absurd wait                        | `Retry-After` is honoured only up to one day                                                                                                    | `retry` tests                       |
 | A forged webhook                                            | HMAC-SHA-256 signature over id, time and body, with one secret per endpoint                                                                     | `signature`, `api` tests            |
 | A captured webhook sent again later                         | A timestamp in the signature that the receiver is told to check, and an id that stays the same so repeats are recognizable                      | `signature` tests                   |
+| One app's token used on another app                         | Every route with an app in its path goes through one check, and another app answers `404`, the same as one that does not exist, so tokens cannot be used to find apps | `api` tests, which walk every registered route |
+| A token used where only the operator may                    | Making apps and tokens, listing apps, and metrics take the operator's key only, and the spec says so route by route, checked against the server | `api` tests                         |
+| A copy of the database handing out tokens                   | Only a SHA-256 hash of each token is stored, and the token is shown once                                                                        | `store`, `api` tests                |
+| A leaked token that must stop at once                       | Revoking takes effect on the next request, since every request looks the token up                                                               | `api` tests                         |
+| Nobody knowing who changed an endpoint or read a secret     | An audit log of changes, secret reads and rotations, naming the operator or the token, with no secrets or values in it                           | `store`, `api` tests                |
 | A guessed API key                                           | At least 24 characters are required, comparison takes constant time, and repeated wrong keys from one address are slowed down                   | `api`, `cmd` tests                  |
 | A right key locked out by someone else's guessing           | The key is checked first, and the slow-down applies only to a wrong one                                                                         | `api` tests                         |
 | The API key showing in the process list                     | It can only be set through the environment, never as a flag                                                                                     | `cmd` tests                         |
@@ -67,8 +74,14 @@ These are real gaps. Read them before relying on the service.
   after the retention period (30 days unless changed), but until then they sit in the clear, and a backup taken earlier keeps
   them. Deleted rows do not shrink the file, and the space is reused until a `VACUUM`, so deleted text may still be in the file
   on disk.
-- **There is one API key, and it is all-powerful.** There are no per-app keys, no roles and no audit log of who did what. Put Bowler
-  behind your own backend, and do not hand the key to anything you do not trust fully.
+- **The API key is all-powerful.** There are no roles for operators, and the audit log shows the key only as `admin`, so two people
+  sharing it cannot be told apart. Put Bowler behind your own backend, and do not hand the key to anything you do not trust fully.
+- **A token has the whole authority of its app.** There are no read-only tokens or narrower scopes. A token can read and rotate
+  signing secrets and create endpoints, so it is for the app's own side. It does not expire until revoked, and the service does
+  not record when it was last used.
+- **The audit entry is written after the action.** If writing it fails, the action has happened and the entry is missing. The
+  failure is logged and counted in `bowler_audit_errors_total`. Refused requests are not in the audit log, only in the request log.
+  An operator with access to the database file can still edit it, since it is not signed or sent anywhere else.
 - **No TLS.** The API speaks plain HTTP. Run it behind a reverse proxy or load balancer that terminates TLS.
 - **No rate limit on the API** except on wrong keys. A caller with the key can send as fast as the machine allows. The
   per-endpoint rate limit protects the *receivers* from Bowler, not Bowler from its callers.

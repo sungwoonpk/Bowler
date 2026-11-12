@@ -931,12 +931,12 @@ func TestMetricsShowRetentionOnlyWhenItIsOn(t *testing.T) {
 	on := newHarness(t, func(s *setup) {
 		s.noWorker = true
 		s.retention = func() retention.Stats {
-			return retention.Stats{Messages: 7, Deliveries: 9, Attempts: 11, Endpoints: 1, Errors: 2}
+			return retention.Stats{Messages: 7, Deliveries: 9, Attempts: 11, Endpoints: 1, AuditEntries: 5, Errors: 2}
 		}
 	})
 	text := string(on.do("GET", "/metrics", nil).raw)
 	for _, want := range []string{`bowler_retention_deleted_total{kind="messages"} 7`, `bowler_retention_deleted_total{kind="deliveries"} 9`,
-		`bowler_retention_deleted_total{kind="attempts"} 11`, `bowler_retention_deleted_total{kind="endpoints"} 1`, "bowler_retention_errors_total 2"} {
+		`bowler_retention_deleted_total{kind="attempts"} 11`, `bowler_retention_deleted_total{kind="endpoints"} 1`, `bowler_retention_deleted_total{kind="audit_entries"} 5`, "bowler_retention_errors_total 2"} {
 		if !strings.Contains(text, want) {
 			t.Errorf("metrics should contain %q:\n%s", want, text)
 		}

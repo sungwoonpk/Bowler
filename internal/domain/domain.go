@@ -169,3 +169,37 @@ func (a Attempt) MarshalJSON() ([]byte, error) {
 		Duration int64 `json:"duration_ms"`
 	}{plain: plain(a), Duration: a.Duration.Milliseconds()})
 }
+
+// AppToken lets the side of one app act on that app only. The token itself is shown once, when it is made, and only a
+// hash is kept.
+type AppToken struct {
+	ID        string     `json:"id"`
+	AppID     string     `json:"app_id"`
+	Name      string     `json:"name"`
+	Prefix    string     `json:"prefix"` // the first characters of the token, to tell tokens apart
+	CreatedAt time.Time  `json:"created_at"`
+	RevokedAt *time.Time `json:"revoked_at,omitempty"`
+}
+
+// Revoked reports whether the token no longer works.
+func (t AppToken) Revoked() bool { return t.RevokedAt != nil }
+
+// Actor kinds for the audit log.
+const (
+	ActorAdmin    = "admin"
+	ActorAppToken = "app_token"
+)
+
+// AuditEntry records one thing someone did.
+type AuditEntry struct {
+	ID           string          `json:"id"`
+	At           time.Time       `json:"at"`
+	ActorKind    string          `json:"actor_kind"`
+	ActorID      string          `json:"actor_id"` // "admin", or a token id
+	AppID        string          `json:"app_id,omitempty"`
+	Action       string          `json:"action"`
+	ResourceKind string          `json:"resource_kind,omitempty"`
+	ResourceID   string          `json:"resource_id,omitempty"`
+	Detail       json.RawMessage `json:"detail,omitempty"`
+	RequestID    string          `json:"request_id,omitempty"`
+}
