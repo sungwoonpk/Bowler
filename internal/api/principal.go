@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/sungwoonpk/bowler/internal/domain"
 	"github.com/sungwoonpk/bowler/internal/token"
@@ -16,6 +17,8 @@ type principal struct {
 	admin   bool
 	appID   string // the one app a token is for. Empty for the operator.
 	tokenID string
+	// readOnly is true for a token that may look and not change anything.
+	readOnly bool
 }
 
 type principalKey struct{}
@@ -49,10 +52,11 @@ func (s *Server) authenticate(r *http.Request) (p principal, ok bool, err error)
 		return principal{admin: true}, true, nil
 	}
 	if token.Looks(bearer) {
-		t, err := s.store.AppTokenByHash(r.Context(), token.Hash(bearer))
+		t, err := s.store.AppTokenByHash(r.Context(), token.Hash(bearer), s.now())
 		switch {
 		case err == nil:
-			return principal{appID: t.AppID, tokenID: t.ID}, true, nil
+			s.noteUse(r, t.ID)
+			return principal{appID: t.AppID, tokenID: t.ID, readOnly: t.Scope == domain.ScopeRead}, true, nil
 		case !isNotFound(err):
 			return principal{}, false, err
 		}
@@ -77,5 +81,22 @@ func (s *Server) audit(w http.ResponseWriter, r *http.Request, appID, action, re
 	if _, err := s.recordAudit(r.Context(), e, s.now()); err != nil {
 		s.auditErrors.Add(1)
 		s.log.Error("recording an audit entry failed", "action", action, "error", err, "request_id", e.RequestID)
+	}
+}
+
+// lastUsedEvery is how often the use of a token is written down. Writing on every request would turn each one into a
+// database write, so the time is approximate, to within this.
+const lastUsedEvery = 10 * time.Minute
+
+// noteUse records that a token was used, at most once in lastUsedEvery for each token. A failure is logged and ignored:
+// it is bookkeeping and must not stop a request that has a valid token.
+func (s *Server) noteUse(r *http.Request, tokenID string) {
+	now := s.now()
+	if prev, ok := s.lastTouched.Load(tokenID); ok && now.Sub(prev.(time.Time)) < lastUsedEvery {
+		return
+	}
+	s.lastTouched.Store(tokenID, now)
+	if err := s.store.TouchAppToken(r.Context(), tokenID, now); err != nil {
+		s.log.Warn("recording the use of a token failed", "token", tokenID, "error", err)
 	}
 }

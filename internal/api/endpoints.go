@@ -234,6 +234,11 @@ func (s *Server) getSecret(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
+	// A signing secret is the power to forge webhooks to this endpoint, so a read-only token may not have it even though
+	// reading it is a GET.
+	if callerOf(r).readOnly {
+		return errReadOnly
+	}
 	// Reading a secret is worth a record: whoever holds it can forge webhooks to this endpoint.
 	s.audit(w, r, app.ID, "endpoint.secret_read", "endpoint", ep.ID, nil)
 	writeJSON(w, http.StatusOK, map[string]string{"secret": ep.Secret})

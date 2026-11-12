@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/sungwoonpk/bowler/internal/domain"
 	"github.com/sungwoonpk/bowler/internal/id"
@@ -15,6 +16,9 @@ import (
 // lists and revokes them, so a token cannot make another.
 
 func isNotFound(err error) bool { return errors.Is(err, store.ErrNotFound) }
+
+// maxTokenHours is the longest a token may be made to last: a year.
+const maxTokenHours = 24 * 365
 
 // tokenWithSecret is the one response that carries the token itself. It is never shown again.
 type tokenWithSecret struct {
@@ -28,7 +32,9 @@ func (s *Server) createToken(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 	var in struct {
-		Name string `json:"name"`
+		Name           string `json:"name"`
+		Scope          string `json:"scope"`
+		ExpiresInHours *int   `json:"expires_in_hours"`
 	}
 	if err := decode(w, r, &in); err != nil {
 		return err
@@ -37,8 +43,26 @@ func (s *Server) createToken(w http.ResponseWriter, r *http.Request) error {
 	if ae != nil {
 		return ae
 	}
+	scope := in.Scope
+	switch scope {
+	case "":
+		scope = domain.ScopeFull
+	case domain.ScopeFull, domain.ScopeRead:
+	default:
+		return badRequest(`scope must be "full" or "read"`)
+	}
+	var expires *time.Time
+	if in.ExpiresInHours != nil {
+		if *in.ExpiresInHours < 1 || *in.ExpiresInHours > maxTokenHours {
+			return badRequest("expires_in_hours must be from 1 to " + strconv.Itoa(maxTokenHours) + ", or left out for a token that does not expire")
+		}
+		t := s.now().Add(time.Duration(*in.ExpiresInHours) * time.Hour)
+		expires = &t
+	}
 	tok := token.New()
-	made, err := s.store.CreateAppToken(r.Context(), app.ID, name, tok.Hash, tok.Short, s.now())
+	made, err := s.store.CreateAppToken(r.Context(), store.NewAppToken{
+		AppID: app.ID, Name: name, Hash: tok.Hash, Prefix: tok.Short, Scope: scope, ExpiresAt: expires,
+	}, s.now())
 	if errors.Is(err, store.ErrTooManyTokens) {
 		return newError(http.StatusConflict, "too_many_tokens",
 			"this app already has "+strconv.Itoa(store.MaxActiveTokensPerApp)+" working tokens, revoke one first")
@@ -46,7 +70,11 @@ func (s *Server) createToken(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
-	s.audit(w, r, app.ID, "token.create", "token", made.ID, map[string]any{"name": made.Name})
+	detail := map[string]any{"name": made.Name, "scope": made.Scope}
+	if made.ExpiresAt != nil {
+		detail["expires_at"] = made.ExpiresAt.UTC().Format(time.RFC3339)
+	}
+	s.audit(w, r, app.ID, "token.create", "token", made.ID, detail)
 	writeJSON(w, http.StatusCreated, tokenWithSecret{AppToken: made, Token: tok.Secret})
 	return nil
 }

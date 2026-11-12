@@ -177,9 +177,25 @@ type AppToken struct {
 	AppID     string     `json:"app_id"`
 	Name      string     `json:"name"`
 	Prefix    string     `json:"prefix"` // the first characters of the token, to tell tokens apart
+	Scope     string     `json:"scope"`  // ScopeFull or ScopeRead
 	CreatedAt time.Time  `json:"created_at"`
 	RevokedAt *time.Time `json:"revoked_at,omitempty"`
+	// ExpiresAt is when the token stops working. Nil means it works until it is revoked.
+	ExpiresAt *time.Time `json:"expires_at,omitempty"`
+	// LastUsedAt is roughly when the token was last used, to within ten minutes. Nil if it never was.
+	LastUsedAt *time.Time `json:"last_used_at,omitempty"`
 }
+
+// Token scopes.
+const (
+	// ScopeFull lets a token do everything its app may.
+	ScopeFull = "full"
+	// ScopeRead lets a token look at its app and change nothing. It cannot read a signing secret.
+	ScopeRead = "read"
+)
+
+// Expired reports whether the token has run out at the given moment.
+func (t AppToken) Expired(now time.Time) bool { return t.ExpiresAt != nil && !now.Before(*t.ExpiresAt) }
 
 // Revoked reports whether the token no longer works.
 func (t AppToken) Revoked() bool { return t.RevokedAt != nil }

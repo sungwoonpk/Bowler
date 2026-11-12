@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"sort"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -49,6 +50,8 @@ type Server struct {
 	retention func() retention.Stats
 	// auditErrors counts audit entries that could not be recorded.
 	auditErrors atomic.Uint64
+	// lastTouched remembers, for each token, when its use was last written down.
+	lastTouched sync.Map
 	// recordAudit writes one audit entry. It is the store's, and a test replaces it to see what a failure does.
 	recordAudit func(context.Context, domain.AuditEntry, time.Time) (domain.AuditEntry, error)
 	maxPayload  int
