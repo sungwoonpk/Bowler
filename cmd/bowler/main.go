@@ -95,7 +95,7 @@ func serve(ctx context.Context, cfg config) error {
 	defer sender.Close()
 
 	disp, err := dispatcher.New(db, sender, dispatcher.Config{
-		Workers: cfg.Workers, AttemptTimeout: cfg.Timeout, LeaseFor: cfg.Timeout + 45*time.Second,
+		Workers: cfg.Workers, AttemptTimeout: cfg.Timeout, LeaseFor: cfg.Lease,
 		DrainTimeout: cfg.Drain, Log: log,
 	})
 	if err != nil {

@@ -22,6 +22,7 @@ type config struct {
 	AllowHTTP    bool
 	Workers      int
 	Timeout      time.Duration
+	Lease        time.Duration
 	Drain        time.Duration
 	MaxPayload   int
 	LogFormat    string
@@ -67,6 +68,7 @@ func parseServe(args []string, getenv func(string) string, stderr io.Writer) (co
 	fs.BoolVar(&c.AllowHTTP, "allow-http", envBool("BOWLER_ALLOW_HTTP"), "allow endpoints that use plain http (BOWLER_ALLOW_HTTP)")
 	fs.IntVar(&c.Workers, "workers", envInt("BOWLER_WORKERS", 128), "most deliveries in progress at once (BOWLER_WORKERS)")
 	fs.DurationVar(&c.Timeout, "timeout", envDur("BOWLER_TIMEOUT", 15*time.Second), "how long one delivery attempt may take (BOWLER_TIMEOUT)")
+	fs.DurationVar(&c.Lease, "lease", envDur("BOWLER_LEASE", 0), "how long work taken by an instance that dies waits before another takes it. Default: the attempt timeout plus 45s (BOWLER_LEASE)")
 	fs.DurationVar(&c.Drain, "drain", envDur("BOWLER_DRAIN", 10*time.Second), "how long to let attempts finish on shutdown (BOWLER_DRAIN)")
 	fs.IntVar(&c.MaxPayload, "max-payload", envInt("BOWLER_MAX_PAYLOAD", 256<<10), "largest message payload in bytes (BOWLER_MAX_PAYLOAD)")
 	fs.StringVar(&c.LogFormat, "log-format", envStr("BOWLER_LOG_FORMAT", "json"), "json or text (BOWLER_LOG_FORMAT)")
@@ -95,6 +97,12 @@ func parseServe(args []string, getenv func(string) string, stderr io.Writer) (co
 	}
 	if c.Timeout < time.Second || c.Timeout > 5*time.Minute {
 		return c, errors.New("--timeout must be from 1s to 5m")
+	}
+	if c.Lease == 0 {
+		c.Lease = c.Timeout + 45*time.Second
+	}
+	if c.Lease < c.Timeout+5*time.Second {
+		return c, errors.New("--lease must be at least 5s longer than --timeout, or a slow attempt would be handed to a second worker while it is still running")
 	}
 	if c.Drain < 0 || c.Drain > 10*time.Minute {
 		return c, errors.New("--drain must be from 0 to 10m")
