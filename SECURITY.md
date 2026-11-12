@@ -15,7 +15,8 @@ confirmed problem is fixed in `main`. Only the latest `main` is supported.
 Read the "What is not covered" section before running it anywhere real. The short version:
 
 - Signing secrets and payloads are stored **unencrypted** in the SQLite file.
-- There is **one all-powerful API key**, and no TLS of its own.
+- There is **one all-powerful API key**, and no TLS of its own. An app's own side can be given a token that works on that
+  app only, and it has that app's whole authority, with no read-only form.
 - It has **not had an independent security review**.
 
 ## If you deploy it

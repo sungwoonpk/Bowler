@@ -27,6 +27,8 @@ Almost every product that has an API ends up sending webhooks, and almost every 
 - **Reliable delivery.** At least once. A message and its deliveries are stored in one transaction before `202`. Retries follow a schedule stretching over about a day, with jitter, and honour `Retry-After`.
 - **Isolation.** An endpoint has a concurrency (1 to 20). The queue takes only as many deliveries from an endpoint as it has free slots, so a backlog behind one slow receiver cannot starve the rest.
 - **Rate limits.** An endpoint can also be limited to a number of attempts per second (1 to 1000). The limit is kept in the database, so a restart does not reset it, and it applies to retries and to `recover`, so replaying a long outage does not flood a receiver that has just been fixed.
+- **Tokens for one app.** The operator's key can make a token for an app. It is shown once and only its hash is stored. It works on that app and no other, another app looks the same as one that does not exist, and it can be revoked at once. This is what a page for your customers needs, since that page cannot hold a key that reads everyone's data.
+- **An audit log.** Endpoint changes, token creation and revocation, every read or rotation of a signing secret, `recover` and replay are recorded with who did them (the operator, or a token), the resource, and the request id. Updates list the fields changed, never the values. Kept 365 days by default.
 - **Retention.** Finished messages are deleted with their deliveries and attempts after 30 days (`--retention`), oldest first, in small transactions that never hold the queue up. A message that still has work to do is never deleted.
 - **Signing.** `webhook-id`, `webhook-timestamp` and `webhook-signature` as the Standard Webhooks specification describes. Rotating a secret sends two signatures for a grace period, so receivers can switch without losing a message.
 - **A public verification package.** `signature` has no dependencies. A Go receiver verifies in one call. Receivers in other languages can use any Standard Webhooks library.
@@ -79,6 +81,19 @@ curl -s localhost:8080/v1/apps/acme-1/messages -H "authorization: Bearer $BOWLER
   -d '{"event_type": "invoice.paid", "payload": {"invoice": "in_1042", "amount": 4200}}'
 ```
 
+Give the app's own side a token that works on that app only, and look at what was done:
+
+```bash
+curl -s localhost:8080/v1/apps/acme-1/tokens -H "authorization: Bearer $BOWLER_API_KEY" -H "content-type: application/json" \
+  -d '{"name": "customer portal"}'
+# the response includes "token": "bwl_...", shown once. Only its hash is kept.
+
+curl -s localhost:8080/v1/apps/acme-1/endpoints -H "authorization: Bearer bwl_..."   # works
+curl -s localhost:8080/v1/apps/other-app/endpoints -H "authorization: Bearer bwl_..." # 404, as if the app did not exist
+curl -s localhost:8080/v1/apps/acme-1/audit-log -H "authorization: Bearer bwl_..."    # who did what
+curl -s -X DELETE localhost:8080/v1/apps/acme-1/tokens/tok_... -H "authorization: Bearer $BOWLER_API_KEY"  # revoked at once
+```
+
 To try it against a server on your own machine, start it with `--allow-private --allow-http`. Those flags exist for development and switch off the protection against calling private addresses, so do not use them in production.
 
 ### Settings
@@ -94,6 +109,7 @@ To try it against a server on your own machine, start it with `--allow-private -
 | `--drain`                       | `10s`                 | How long shutdown lets attempts finish                                                        |
 | `--max-payload`                 | `262144`              | Largest message payload, in bytes                                                             |
 | `--retention`, `BOWLER_RETENTION` | `720h` (30 days)    | How long finished messages and their history are kept. `0` keeps everything, otherwise at least `24h` |
+| `--audit-retention`, `BOWLER_AUDIT_RETENTION` | `8760h` (365 days) | How long the audit log is kept. `0` keeps everything, otherwise at least `168h`              |
 | `--log-format`, `--log-level`   | `json`, `info`        | `json` or `text`, and `debug`, `info`, `warn` or `error`                                      |
 | `--allow-private`, `--allow-http` | off                 | Development only. See the warning above                                                       |
 
@@ -177,11 +193,11 @@ The ceiling is still SQLite's single writer, only higher. Moving to a networked 
 make check       # format, vet, staticcheck, errcheck, gosec, race tests with coverage, vulnerabilities
 ```
 
-- **176 tests** run with the race detector, and the libraries have **91% coverage**. CI fails under 85%.
+- **204 tests** run with the race detector, and the libraries have **91% coverage**. CI fails under 85%.
 - **A test that kills the real program.** It starts `bowler serve` as a separate process, sends twenty messages to a receiver that holds its requests open, waits until deliveries are in flight, kills the process with `kill -9`, starts it again on the same database, and checks that every message reaches the customer.
 - **Concurrency.** Twelve workers share one queue and each delivery is handed out exactly once. Three dispatchers share a queue and nothing is sent twice. A slow endpoint with two hundred deliveries behind it does not delay a healthy one.
 - **Failure handling.** Every status class, timeouts, refused connections, DNS failures, bad certificates, redirects, a reply that never ends, a sender that panics, a lease that is lost, shutdown mid-attempt.
-- **Security.** Every kind of private address, a name that resolves to loopback, `HTTP_PROXY` ignored, the API key never in the log, one app unable to read another's data.
+- **Security.** Every kind of private address, a name that resolves to loopback, `HTTP_PROXY` ignored, the API key never in the log, one app unable to read another's data. For tokens, a test walks every route the server registers and checks that a token of one app cannot reach another, and that the operator-only routes refuse tokens. A second test checks the spec's claim for each route against the server. These were checked by loosening the code on purpose.
 - **The API.** Strict input checks, pagination, idempotency, errors that do not leak details, and a payload that reaches the receiver byte for byte.
 - **The documentation is tested.** The signing example is compiled and run. The OpenAPI file is compared with the routes the server registers, and these tests were checked by breaking the file on purpose.
 - **CI** runs all of that, plus a scan for known vulnerabilities, CodeQL, builds for Linux, macOS and Windows, the demo with its output checked, and a container that must become healthy, run as an unprivileged user and stop cleanly.
@@ -196,7 +212,8 @@ Bowler/
 ├── internal/
 │   ├── store/            the database and the queue: leases, fairness, replay, recovery
 │   ├── dispatcher/       runs the queue, writes results in batches, shuts down in order
-│   ├── retention/        deletes finished data after the retention period
+│   ├── retention/        deletes finished data and old audit entries after their retention periods
+│   ├── token/            makes app tokens and the hashes that are stored
 │   ├── deliver/          one attempt, and a verdict
 │   ├── ssrf/             which addresses may be called
 │   ├── api/              the HTTP interface, one file per resource
@@ -219,6 +236,7 @@ Written down in [docs/decisions](docs/decisions), each with what it costs:
 - [0006. Results are written in batches by one writer](docs/decisions/0006-batched-result-writes.md)
 - [0007. An endpoint can be limited to a number of attempts per second](docs/decisions/0007-per-endpoint-rate-limit.md)
 - [0008. Finished data is deleted after a retention period](docs/decisions/0008-retention.md)
+- [0009. An app can be given a token that works on that app only, and what is done is recorded](docs/decisions/0009-app-tokens-and-audit-log.md)
 
 ## Security
 
@@ -232,12 +250,13 @@ An honest list of what this version does not do:
 - **Signing secrets and payloads are stored unencrypted.** Payloads are deleted after the retention period, but until then they are in the clear, so use an encrypted volume.
 - **An idempotency key stops protecting once its message is deleted** by retention.
 - **A rate limit allows a burst of one second's worth** after a quiet time, and is kept on average, to within the 250 ms poll.
-- **One API key, and it can do everything.** There are no per-app keys, roles or audit log.
+- **The operator's API key can do everything**, and the audit log shows it only as `admin`, so people who share it cannot be told apart. A token has the whole authority of its app: no read-only tokens, no expiry, no record of last use.
+- **The audit entry is written after the action**, not in the same transaction. A failed write is logged and counted, and the entry is missing.
 - **No TLS and no rate limit on the API itself.** Put it behind a proxy. The per-endpoint rate limit protects receivers, not the API.
 - **A receiver on a private network cannot be reached** without the global development flag, which removes the SSRF protection. There is no per-endpoint allow list yet.
 - **At least once, not exactly once, and no ordering guarantee.**
 - **HMAC signatures only.** The specification's asymmetric `v1a` scheme is not implemented.
-- **No interface for your customers.** It is an API. A page where a customer manages their endpoints and reads their delivery log is not built.
+- **No interface for your customers.** It is an API. Tokens make such a page possible, and the page itself is not built.
 - **Throughput is bounded by one SQLite writer**, measured above on one laptop. Batching raised the bound and did not remove it.
 - **The Docker image is built and checked by CI**, and has not been built by hand on the author's machine.
 - **Demo grade.** It has had no independent security review.
@@ -246,7 +265,7 @@ An honest list of what this version does not do:
 
 1. Postgres, and more than one node
 2. Encrypt secrets at rest, and a retention period per app
-3. Per-app keys and an audit log
-4. A page for your customers to manage endpoints and read their delivery log
+3. Named operator credentials, read-only and expiring tokens, and the audit entry in the same transaction as the change
+4. A page for your customers to manage endpoints and read their delivery log, using tokens
 5. Wake the dispatcher exactly when a rate limit allows more, instead of on the next poll
 6. Asymmetric `v1a` signatures, and a per-endpoint allow list for private receivers
