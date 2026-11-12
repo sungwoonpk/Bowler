@@ -44,10 +44,13 @@ every customer's data. Separately, with one key there was no record of who chang
 
 ## Costs
 
-- **A token has the whole authority of its app.** There are no read-only tokens and no narrower scopes. A token can read and
-  rotate secrets and create endpoints that point anywhere the SSRF rules allow. It is meant for the app's own side. A customer
-  portal would want a layer on top that narrows it.
-- **A token does not expire** until it is revoked, and the service does not record when one was last used.
+- **A full token has the whole authority of its app.** It can read and rotate secrets and create endpoints that point anywhere
+  the SSRF rules allow. It is meant for the app's own side. A customer portal would want a layer on top that narrows it.
+  *Later added:* a token can be made **read only** (it may look, may not change anything, and may not read a signing secret,
+  though reading it is a GET), and can be made to **expire** after up to a year. There is nothing between read and full.
+- **The service records roughly when a token was last used**, to within ten minutes. It is written at most that often per token,
+  so that using a token does not turn each request into a database write. It is for finding tokens nobody uses, and it is not
+  an exact record. The audit log is the exact one for what a token did.
 - **The audit entry is written after the action, not in the same transaction.** If the write fails, the action has happened and
   the entry is missing. The caller is told the action worked, the failure is logged, and `bowler_audit_errors_total` counts
   it, so a gap is noticed and not hidden. Making them one transaction would mean passing the entry into every store method.
