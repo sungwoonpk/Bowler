@@ -35,7 +35,7 @@ type Claim struct {
 
 // endpointsWithWorkSQL lists the endpoints that have something ready, the ones waiting longest first.
 const endpointsWithWorkSQL = `
-SELECT e.id, e.concurrency
+SELECT e.id, e.concurrency, e.rate_per_second, e.rate_tat
 FROM endpoints e
 WHERE e.deleted_at IS NULL AND e.disabled_at IS NULL
   AND (EXISTS (SELECT 1 FROM deliveries d WHERE d.endpoint_id = e.id AND d.state = 'pending'  AND d.next_attempt_at <= ?1)
@@ -68,10 +68,12 @@ func readyIDs(ctx context.Context, tx *sql.Tx, now time.Time, limit int) ([]stri
 	type endpointSlots struct {
 		id          string
 		concurrency int
+		rate        int   // attempts per second, 0 for no limit
+		tat         int64 // milliseconds up to which the allowance is already handed out
 	}
 	endpoints, err := collect(rows, func(r scanner) (endpointSlots, error) {
 		var e endpointSlots
-		return e, r.Scan(&e.id, &e.concurrency)
+		return e, r.Scan(&e.id, &e.concurrency, &e.rate, &e.tat)
 	})
 	if err != nil {
 		return nil, err
@@ -90,6 +92,15 @@ func readyIDs(ctx context.Context, tx *sql.Tx, now time.Time, limit int) ([]stri
 		if free <= 0 {
 			continue
 		}
+		// A rate limit also bounds how many may start now. See rateAllowance.
+		nowMS := ms(now)
+		start := max(e.tat, nowMS)
+		if e.rate > 0 {
+			free = min(free, rateAllowance(e.rate, start, nowMS))
+			if free <= 0 {
+				continue
+			}
+		}
 		rows, err := tx.QueryContext(ctx, readySQL, e.id, ms(now), min(free, limit-len(ids)))
 		if err != nil {
 			return nil, err
@@ -102,8 +113,30 @@ func readyIDs(ctx context.Context, tx *sql.Tx, now time.Time, limit int) ([]stri
 			return nil, err
 		}
 		ids = append(ids, got...)
+		if e.rate > 0 && len(got) > 0 {
+			interval := rateInterval(e.rate)
+			if _, err := tx.ExecContext(ctx, `UPDATE endpoints SET rate_tat = ? WHERE id = ?`, start+int64(len(got))*interval, e.id); err != nil {
+				return nil, err
+			}
+		}
 	}
 	return ids, nil
+}
+
+// rateInterval is the gap, in milliseconds, between two attempts at the given rate.
+func rateInterval(perSecond int) int64 { return int64(1000 / perSecond) }
+
+// rateAllowance says how many attempts an endpoint may start now. Every attempt moves "start", the point up to which
+// the allowance is spent, forward by one interval, and the endpoint may run ahead of the clock by one second. So after a
+// quiet time up to one second's worth (the rate itself) can go at once, and after that the rate holds. This is the
+// generic cell rate algorithm, which needs one number per endpoint where a token bucket would need two.
+func rateAllowance(perSecond int, start, nowMS int64) int {
+	interval := rateInterval(perSecond)
+	room := nowMS + int64(perSecond)*interval - start
+	if room < interval {
+		return 0
+	}
+	return int(room / interval)
 }
 
 // ClaimDue hands up to limit ready deliveries to owner, each under a lease that lasts leaseFor.

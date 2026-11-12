@@ -11,6 +11,10 @@ import (
 // connections instead of opening and closing one for nearly every request.
 const MaxConcurrency = 20
 
+// MaxRatePerSecond is the highest rate limit an endpoint can be given. A limit is a whole number of attempts per second,
+// and 1000 keeps the gap between two attempts at a whole number of milliseconds or more.
+const MaxRatePerSecond = 1000
+
 // App is one of Bowler's customers: a company that sends webhooks to its own customers.
 type App struct {
 	ID        string    `json:"id"`
@@ -29,7 +33,10 @@ type Endpoint struct {
 	EventTypes []string `json:"event_types"`
 	// Concurrency is how many deliveries to this endpoint may be in flight at once. One means they go out one at a
 	// time, which is gentle on a receiver and roughly keeps order.
-	Concurrency    int        `json:"concurrency"`
+	Concurrency int `json:"concurrency"`
+	// RatePerSecond caps how many attempts start per second, on average. Zero means no limit. Up to one second's
+	// worth may go out together after a quiet time.
+	RatePerSecond  int        `json:"rate_limit_per_second"`
 	DisabledAt     *time.Time `json:"disabled_at,omitempty"`
 	DisabledReason string     `json:"disabled_reason,omitempty"`
 	CreatedAt      time.Time  `json:"created_at"`
