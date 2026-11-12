@@ -193,7 +193,7 @@ The ceiling is still SQLite's single writer, only higher. Moving to a networked 
 make check       # format, vet, staticcheck, errcheck, gosec, race tests with coverage, vulnerabilities
 ```
 
-- **204 tests** run with the race detector, and the libraries have **91% coverage**. CI fails under 85%.
+- **204 tests** run with the race detector, and the libraries have **92% coverage**. CI fails under 85%.
 - **A test that kills the real program.** It starts `bowler serve` as a separate process, sends twenty messages to a receiver that holds its requests open, waits until deliveries are in flight, kills the process with `kill -9`, starts it again on the same database, and checks that every message reaches the customer.
 - **Concurrency.** Twelve workers share one queue and each delivery is handed out exactly once. Three dispatchers share a queue and nothing is sent twice. A slow endpoint with two hundred deliveries behind it does not delay a healthy one.
 - **Failure handling.** Every status class, timeouts, refused connections, DNS failures, bad certificates, redirects, a reply that never ends, a sender that panics, a lease that is lost, shutdown mid-attempt.

@@ -17,7 +17,7 @@ const MaxActiveTokensPerApp = 50
 // ErrTooManyTokens is returned when an app already holds the most working tokens.
 var ErrTooManyTokens = errors.New("store: the app already has the most tokens it may hold")
 
-const tokenColumns = "id, app_id, name, token_prefix, created_at, revoked_at"
+const tokenColumns = "id, app_id, name, token_prefix, created_at, revoked_at" // #nosec G101 -- a list of column names, not a credential
 
 func scanToken(r scanner) (domain.AppToken, error) {
 	var (
