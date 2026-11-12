@@ -16,6 +16,7 @@ import (
 
 	"github.com/sungwoonpk/bowler/internal/deliver"
 	"github.com/sungwoonpk/bowler/internal/dispatcher"
+	"github.com/sungwoonpk/bowler/internal/retention"
 	"github.com/sungwoonpk/bowler/internal/ssrf"
 	"github.com/sungwoonpk/bowler/internal/store"
 	"github.com/sungwoonpk/bowler/retry"
@@ -84,6 +85,7 @@ type setup struct {
 	policy     ssrf.Policy
 	maxPayload int
 	noWorker   bool
+	retention  func() retention.Stats
 }
 
 func newHarness(t *testing.T, opts ...func(*setup)) *harness {
@@ -112,7 +114,7 @@ func newHarness(t *testing.T, opts ...func(*setup)) *harness {
 		go func() { disp.Run(ctx); close(done) }()
 		t.Cleanup(func() { cancel(); <-done })
 	}
-	api, err := New(Config{Store: st, APIKey: testKey, SSRF: cfg.policy, Notify: disp.Notify, Stats: disp.Stats, MaxPayloadBytes: cfg.maxPayload, Version: "test"})
+	api, err := New(Config{Store: st, APIKey: testKey, SSRF: cfg.policy, Notify: disp.Notify, Stats: disp.Stats, Retention: cfg.retention, MaxPayloadBytes: cfg.maxPayload, Version: "test"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -775,7 +777,7 @@ func TestMetricsAndHealth(t *testing.T) {
 
 	m := h.do("GET", "/metrics", nil)
 	text := string(m.raw)
-	for _, want := range []string{`bowler_deliveries{state="succeeded"} 1`, "bowler_attempts_total{result=\"succeeded\"} 1", "bowler_claimed_total 1", `bowler_build_info{version="test"} 1`} {
+	for _, want := range []string{`bowler_deliveries{state="succeeded"} 1`, "bowler_attempts_total{result=\"succeeded\"} 1", "bowler_claimed_total 1", "bowler_results_total 1", "bowler_result_batches_total 1", `bowler_build_info{version="test"} 1`} {
 		if !strings.Contains(text, want) {
 			t.Errorf("metrics should contain %q:\n%s", want, text)
 		}
@@ -918,5 +920,25 @@ func TestEndpointCanBeCreatedWithARateLimit(t *testing.T) {
 	r = h.do("POST", "/v1/apps/"+app+"/endpoints", map[string]any{"url": rc.srv.URL})
 	if r.status != 201 || r.body["rate_limit_per_second"] != float64(0) {
 		t.Fatalf("no limit by default: %d %s", r.status, r.raw)
+	}
+}
+
+func TestMetricsShowRetentionOnlyWhenItIsOn(t *testing.T) {
+	off := newHarness(t, func(s *setup) { s.noWorker = true })
+	if text := string(off.do("GET", "/metrics", nil).raw); strings.Contains(text, "bowler_retention") {
+		t.Errorf("with retention off its metrics should be absent:\n%s", text)
+	}
+	on := newHarness(t, func(s *setup) {
+		s.noWorker = true
+		s.retention = func() retention.Stats {
+			return retention.Stats{Messages: 7, Deliveries: 9, Attempts: 11, Endpoints: 1, Errors: 2}
+		}
+	})
+	text := string(on.do("GET", "/metrics", nil).raw)
+	for _, want := range []string{`bowler_retention_deleted_total{kind="messages"} 7`, `bowler_retention_deleted_total{kind="deliveries"} 9`,
+		`bowler_retention_deleted_total{kind="attempts"} 11`, `bowler_retention_deleted_total{kind="endpoints"} 1`, "bowler_retention_errors_total 2"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("metrics should contain %q:\n%s", want, text)
+		}
 	}
 }

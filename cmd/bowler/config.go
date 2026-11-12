@@ -25,8 +25,10 @@ type config struct {
 	Lease        time.Duration
 	Drain        time.Duration
 	MaxPayload   int
-	LogFormat    string
-	LogLevel     slog.Level
+	// Retention is how long finished data is kept. Zero keeps it for ever.
+	Retention time.Duration
+	LogFormat string
+	LogLevel  slog.Level
 }
 
 const minAPIKey = 24
@@ -71,6 +73,7 @@ func parseServe(args []string, getenv func(string) string, stderr io.Writer) (co
 	fs.DurationVar(&c.Lease, "lease", envDur("BOWLER_LEASE", 0), "how long work taken by an instance that dies waits before another takes it. Default: the attempt timeout plus 45s (BOWLER_LEASE)")
 	fs.DurationVar(&c.Drain, "drain", envDur("BOWLER_DRAIN", 10*time.Second), "how long to let attempts finish on shutdown (BOWLER_DRAIN)")
 	fs.IntVar(&c.MaxPayload, "max-payload", envInt("BOWLER_MAX_PAYLOAD", 256<<10), "largest message payload in bytes (BOWLER_MAX_PAYLOAD)")
+	fs.DurationVar(&c.Retention, "retention", envDur("BOWLER_RETENTION", 30*24*time.Hour), "how long finished messages and their history are kept, 0 to keep for ever (BOWLER_RETENTION)")
 	fs.StringVar(&c.LogFormat, "log-format", envStr("BOWLER_LOG_FORMAT", "json"), "json or text (BOWLER_LOG_FORMAT)")
 	level := fs.String("log-level", envStr("BOWLER_LOG_LEVEL", "info"), "debug, info, warn or error (BOWLER_LOG_LEVEL)")
 	if err := fs.Parse(args); err != nil {
@@ -109,6 +112,9 @@ func parseServe(args []string, getenv func(string) string, stderr io.Writer) (co
 	}
 	if c.MaxPayload < 1024 || c.MaxPayload > 1<<20 {
 		return c, errors.New("--max-payload must be from 1024 to 1048576 bytes")
+	}
+	if c.Retention != 0 && c.Retention < 24*time.Hour {
+		return c, errors.New("--retention must be 0 to keep for ever, or at least 24h. A shorter time would delete history before a slow retry schedule has finished")
 	}
 	return c, nil
 }

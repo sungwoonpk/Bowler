@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/sungwoonpk/bowler/internal/dispatcher"
+	"github.com/sungwoonpk/bowler/internal/retention"
 	"github.com/sungwoonpk/bowler/internal/ssrf"
 	"github.com/sungwoonpk/bowler/internal/store"
 )
@@ -27,6 +28,8 @@ type Config struct {
 	Notify func()
 	// Stats reports the dispatcher's counters for /metrics. Optional.
 	Stats func() dispatcher.Stats
+	// Retention reports what the retention janitor has deleted, for /metrics. Optional.
+	Retention func() retention.Stats
 	// MaxPayloadBytes is the largest message payload accepted. Default 256 KB.
 	MaxPayloadBytes int
 	Version         string
@@ -41,6 +44,7 @@ type Server struct {
 	policy     ssrf.Policy
 	notify     func()
 	stats      func() dispatcher.Stats
+	retention  func() retention.Stats
 	maxPayload int
 	version    string
 	now        func() time.Time
@@ -59,7 +63,7 @@ func New(cfg Config) (*Server, error) {
 		return nil, errors.New("api: the API key must be at least 24 characters, for example from `openssl rand -hex 24`")
 	}
 	s := &Server{
-		store: cfg.Store, apiKey: cfg.APIKey, policy: cfg.SSRF, notify: cfg.Notify, stats: cfg.Stats,
+		store: cfg.Store, apiKey: cfg.APIKey, policy: cfg.SSRF, notify: cfg.Notify, stats: cfg.Stats, retention: cfg.Retention,
 		maxPayload: cfg.MaxPayloadBytes, version: cfg.Version, now: cfg.Now, log: cfg.Log,
 		failures: newFailureTracker(10, time.Minute), mux: http.NewServeMux(),
 	}
