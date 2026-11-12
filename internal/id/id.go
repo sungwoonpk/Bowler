@@ -14,6 +14,8 @@ const (
 	Message  = "msg"
 	Delivery = "dlv"
 	Attempt  = "att"
+	Token    = "tok"
+	Audit    = "aud"
 )
 
 var enc = base32.StdEncoding.WithPadding(base32.NoPadding)
