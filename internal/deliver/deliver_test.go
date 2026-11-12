@@ -388,3 +388,25 @@ func TestClassifyErrorCoversTheCommonCases(t *testing.T) {
 		}
 	}
 }
+
+func TestShortenNeverCutsACharacterInHalf(t *testing.T) {
+	if got := shorten("abcdef", 10); got != "abcdef" {
+		t.Errorf("a short text is left alone: %q", got)
+	}
+	// "é" is two bytes. Cutting after the first byte would leave an invalid character.
+	got := shorten("aé", 2)
+	if got != "a" || !utf8Valid(got) {
+		t.Errorf("a cut in the middle of a character drops that character: %q", got)
+	}
+	if got := shorten("日本語日本語", 7); !utf8Valid(got) || len(got) > 7 {
+		t.Errorf("%q", got)
+	}
+}
+
+func utf8Valid(s string) bool { return strings.ToValidUTF8(s, "") == s }
+
+func TestCloseIsSafeToCallTwice(t *testing.T) {
+	s := local()
+	s.Close()
+	s.Close()
+}

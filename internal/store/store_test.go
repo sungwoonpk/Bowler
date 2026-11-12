@@ -808,3 +808,87 @@ func TestRecoverRespectsTheCutoffForMissedMessages(t *testing.T) {
 		t.Fatalf("only the message after the cutoff is recovered, got %d", n)
 	}
 }
+
+func TestPageLimitIsKeptInRange(t *testing.T) {
+	for in, want := range map[int]int{-5: 50, 0: 50, 1: 1, 100: 100, 250: 250, 251: 250, 99999: 250} {
+		if got := (Page{Limit: in}).limit(); got != want {
+			t.Errorf("limit %d became %d, want %d", in, got, want)
+		}
+	}
+}
+
+func TestListingEndpointsAndDeliveriesAcrossPages(t *testing.T) {
+	w := newWorld(t)
+	var created []string
+	for i := range 5 {
+		e, err := w.s.CreateEndpoint(ctx(), NewEndpoint{AppID: w.app.ID, URL: fmt.Sprintf("https://e%d.example/h", i), Secret: "whsec_c2VjcmV0"}, t0.Add(time.Duration(i)*time.Second))
+		if err != nil {
+			t.Fatal(err)
+		}
+		created = append(created, e.ID)
+	}
+	var seen []string
+	cursor := ""
+	for range 10 {
+		page, next, err := w.s.ListEndpoints(ctx(), w.app.ID, Page{Limit: 2, Cursor: cursor})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, e := range page {
+			seen = append(seen, e.ID)
+		}
+		if next == "" {
+			break
+		}
+		cursor = next
+	}
+	if len(seen) != 5 || seen[0] != created[4] || seen[4] != created[0] {
+		t.Fatalf("pages should list all five, newest first: %v", seen)
+	}
+	if _, _, err := w.s.ListEndpoints(ctx(), w.app.ID, Page{Cursor: "!!"}); !errors.Is(err, ErrBadCursor) {
+		t.Fatalf("got %v", err)
+	}
+
+	// Deliveries to one endpoint, in pages.
+	for i := range 5 {
+		w.send(t, "x", t0.Add(time.Duration(i)*time.Second))
+	}
+	var dseen int
+	cursor = ""
+	for range 10 {
+		page, next, err := w.s.ListDeliveriesForEndpoint(ctx(), w.app.ID, created[0], "", Page{Limit: 2, Cursor: cursor})
+		if err != nil {
+			t.Fatal(err)
+		}
+		dseen += len(page)
+		if next == "" {
+			break
+		}
+		cursor = next
+	}
+	if dseen != 5 {
+		t.Fatalf("pages of deliveries should add up to 5, got %d", dseen)
+	}
+	if _, _, err := w.s.ListDeliveriesForEndpoint(ctx(), w.app.ID, created[0], "", Page{Cursor: "!!"}); !errors.Is(err, ErrBadCursor) {
+		t.Fatalf("got %v", err)
+	}
+}
+
+func TestDeletingSomeoneElsesEndpointFails(t *testing.T) {
+	w := newWorld(t)
+	e := w.endpoint(t, "https://a.example/hook", nil, 1)
+	other, _ := w.s.CreateApp(ctx(), "other", nil, t0)
+	if err := w.s.DeleteEndpoint(ctx(), other.ID, e.ID, t0); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("got %v", err)
+	}
+	if err := w.s.DeleteEndpoint(ctx(), w.app.ID, e.ID, t0); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.s.DeleteEndpoint(ctx(), w.app.ID, e.ID, t0); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("deleting twice: %v", err)
+	}
+	// The history of a deleted endpoint stays readable.
+	if _, _, err := w.s.ListDeliveriesForEndpoint(ctx(), w.app.ID, e.ID, "", Page{}); err != nil {
+		t.Fatalf("history of a deleted endpoint should still be readable: %v", err)
+	}
+}

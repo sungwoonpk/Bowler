@@ -794,3 +794,78 @@ func TestInternalErrorsDoNotLeakDetails(t *testing.T) {
 		t.Fatalf("readiness fails when the database does: %d", rd.status)
 	}
 }
+
+func TestListingEndpointsDeliveriesAndReadingAMessage(t *testing.T) {
+	h := newHarness(t, func(s *setup) { s.noWorker = true })
+	app := h.app("a")
+	rc := newReceiver(t)
+	var first string
+	for i := range 4 {
+		id, _ := h.endpoint(app, rc.srv.URL, map[string]any{"description": fmt.Sprintf("ep %d", i)})
+		if i == 0 {
+			first = id
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	page := h.do("GET", "/v1/apps/"+app+"/endpoints?limit=3", nil)
+	if len(page.body["data"].([]any)) != 3 || str(page.body, "next_cursor") == "" {
+		t.Fatalf("%s", page.raw)
+	}
+	rest := h.do("GET", "/v1/apps/"+app+"/endpoints?limit=3&cursor="+str(page.body, "next_cursor"), nil)
+	if len(rest.body["data"].([]any)) != 1 || str(rest.body, "next_cursor") != "" {
+		t.Fatalf("%s", rest.raw)
+	}
+	if r := h.do("GET", "/v1/apps/"+app+"/endpoints?limit=0", nil); r.status != 400 {
+		t.Fatalf("%d", r.status)
+	}
+
+	msg := h.send(app, "invoice.paid", map[string]any{"n": 1})
+	got := h.do("GET", "/v1/apps/"+app+"/messages/"+str(msg.body, "id"), nil)
+	if got.status != 200 || str(got.body, "event_type") != "invoice.paid" {
+		t.Fatalf("reading a message back: %d %s", got.status, got.raw)
+	}
+	for i := range 3 {
+		h.send(app, "x", map[string]any{"i": i})
+	}
+	pending := h.do("GET", "/v1/apps/"+app+"/endpoints/"+first+"/deliveries?state=pending&limit=2", nil)
+	if len(pending.body["data"].([]any)) != 2 || str(pending.body, "next_cursor") == "" {
+		t.Fatalf("%s", pending.raw)
+	}
+	if more := h.do("GET", "/v1/apps/"+app+"/endpoints/"+first+"/deliveries?state=pending&limit=2&cursor="+str(pending.body, "next_cursor"), nil); len(more.body["data"].([]any)) != 2 {
+		t.Fatalf("%s", more.raw)
+	}
+	if none := h.do("GET", "/v1/apps/"+app+"/endpoints/"+first+"/deliveries?state=succeeded", nil); len(none.body["data"].([]any)) != 0 {
+		t.Fatalf("%s", none.raw)
+	}
+	if r := h.do("GET", "/v1/apps/"+app+"/endpoints/"+first+"/deliveries?state=weird", nil); r.status != 400 {
+		t.Fatalf("an unknown state is a 400: %d", r.status)
+	}
+	if r := h.do("GET", "/v1/apps/"+app+"/endpoints/"+first+"/deliveries?cursor=%25%25", nil); r.status != 400 {
+		t.Fatalf("a bad cursor is a 400: %d", r.status)
+	}
+}
+
+func TestEndpointCreationValidation(t *testing.T) {
+	h := newHarness(t, func(s *setup) { s.noWorker = true })
+	app := h.app("a")
+	rc := newReceiver(t)
+	cases := map[string]map[string]any{
+		"long description":     {"url": rc.srv.URL, "description": strings.Repeat("d", 501)},
+		"bad event type":       {"url": rc.srv.URL, "event_types": []string{"has space"}},
+		"too many types":       {"url": rc.srv.URL, "event_types": make([]string, 51)},
+		"negative concurrency": {"url": rc.srv.URL, "concurrency": -1},
+		"huge concurrency":     {"url": rc.srv.URL, "concurrency": 21},
+	}
+	for name, body := range cases {
+		if r := h.do("POST", "/v1/apps/"+app+"/endpoints", body); r.status != 400 {
+			t.Errorf("%s: got %d", name, r.status)
+		}
+	}
+	if r := h.do("POST", "/v1/apps/ghost/endpoints", map[string]any{"url": rc.srv.URL}); r.status != 404 {
+		t.Errorf("an endpoint for an app that does not exist: %d", r.status)
+	}
+	r := h.do("POST", "/v1/apps/"+app+"/endpoints", map[string]any{"url": rc.srv.URL, "event_types": []string{}})
+	if r.status != 201 || fmt.Sprint(r.body["event_types"]) != "[]" {
+		t.Errorf("an empty list means the endpoint takes no events at all, which is not the same as every event: %d %s", r.status, r.raw)
+	}
+}
