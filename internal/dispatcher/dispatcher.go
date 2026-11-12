@@ -43,6 +43,10 @@ type Config struct {
 	LeaseFor time.Duration
 	// AttemptTimeout is the longest one attempt takes, as set on the sender. It is used to check LeaseFor. Default 15s.
 	AttemptTimeout time.Duration
+	// BatchMax is the most results written to the database in one transaction. Default 64.
+	BatchMax int
+	// BatchWindow is how long the first result of a batch waits for company before it is written. Default 2ms.
+	BatchWindow time.Duration
 	// DrainTimeout is how long shutdown waits for attempts in progress before cutting them off. Default 10s.
 	DrainTimeout time.Duration
 	// Retry is the retry schedule. Default retry.Default().
@@ -71,6 +75,12 @@ func (c *Config) setDefaults() {
 	}
 	if c.LeaseFor <= 0 {
 		c.LeaseFor = 60 * time.Second
+	}
+	if c.BatchMax <= 0 {
+		c.BatchMax = 64
+	}
+	if c.BatchWindow <= 0 {
+		c.BatchWindow = 2 * time.Millisecond
 	}
 	if c.DrainTimeout <= 0 {
 		c.DrainTimeout = 10 * time.Second
@@ -111,6 +121,9 @@ type Stats struct {
 	LeaseLost  uint64
 	StoreError uint64
 	Panics     uint64
+	// Results is how many results were written, and ResultBatches how many transactions it took.
+	Results       uint64
+	ResultBatches uint64
 }
 
 // Dispatcher runs the queue.
@@ -121,10 +134,12 @@ type Dispatcher struct {
 
 	wake chan struct{} // new work may be ready
 	done chan struct{} // an attempt finished, so a worker slot is free
+	out  chan pendingResult
 
 	inFlight                                     atomic.Int64
 	claimed, succeeded, retried, failed, aborted atomic.Uint64
 	leaseLost, storeErrors, panics               atomic.Uint64
+	results, batches                             atomic.Uint64
 }
 
 // New builds a dispatcher. It returns an error when the configuration cannot work.
@@ -134,7 +149,8 @@ func New(s *store.Store, sender Sender, cfg Config) (*Dispatcher, error) {
 		return nil, fmt.Errorf("dispatcher: the lease (%v) must be at least 5s longer than an attempt may take (%v), "+
 			"or a slow attempt would be given to a second worker while it is still running", cfg.LeaseFor, cfg.AttemptTimeout)
 	}
-	return &Dispatcher{store: s, sender: sender, cfg: cfg, wake: make(chan struct{}, 1), done: make(chan struct{}, 1)}, nil
+	return &Dispatcher{store: s, sender: sender, cfg: cfg, wake: make(chan struct{}, 1), done: make(chan struct{}, 1),
+		out: make(chan pendingResult, cfg.BatchMax)}, nil
 }
 
 // Notify tells the dispatcher that new work may be ready, so it need not wait for the next poll. It never blocks.
@@ -151,6 +167,7 @@ func (d *Dispatcher) Stats() Stats {
 		InFlight: d.inFlight.Load(), Claimed: d.claimed.Load(), Succeeded: d.succeeded.Load(), Retried: d.retried.Load(),
 		Failed: d.failed.Load(), Aborted: d.aborted.Load(), LeaseLost: d.leaseLost.Load(),
 		StoreError: d.storeErrors.Load(), Panics: d.panics.Load(),
+		Results: d.results.Load(), ResultBatches: d.batches.Load(),
 	}
 }
 
@@ -163,6 +180,14 @@ func (d *Dispatcher) Run(ctx context.Context) error {
 	work, cancelWork := context.WithCancel(context.WithoutCancel(ctx))
 	defer cancelWork()
 	var wg sync.WaitGroup
+
+	// Results are written by one goroutine, in batches. It is started first and stopped last, after every attempt has
+	// reported, so no result is lost on the way out.
+	writerDone := make(chan struct{})
+	go func() {
+		defer close(writerDone)
+		d.writeResults()
+	}()
 
 	timer := time.NewTimer(0)
 	defer timer.Stop()
@@ -224,6 +249,8 @@ loop:
 		cancelWork()
 		<-finished
 	}
+	close(d.out)
+	<-writerDone
 	return nil
 }
 
@@ -255,7 +282,7 @@ func (d *Dispatcher) handle(ctx context.Context, c store.Claim) {
 		out = d.sender.Send(ctx, c)
 	}()
 
-	// Recording the result must succeed even while shutting down, so it does not use the cancellable context.
+	// Releasing a cut-off attempt must succeed even while shutting down, so it does not use the cancellable context.
 	rec, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	defer cancel()
 	now := d.cfg.Now()
@@ -290,7 +317,11 @@ func (d *Dispatcher) handle(ctx context.Context, c store.Claim) {
 		}
 	}
 
-	if err := d.store.Complete(rec, comp); err != nil {
+	// The result is handed to the writer, and this waits until it is on disk. Waiting keeps the worker slot taken until
+	// then, so a slow disk slows the intake of new work instead of letting results pile up in memory.
+	reply := make(chan error, 1)
+	d.out <- pendingResult{completion: comp, reply: reply}
+	if err := <-reply; err != nil {
 		if errors.Is(err, store.ErrLeaseLost) {
 			d.leaseLost.Add(1)
 			d.cfg.Log.Warn("lease was lost before the result could be recorded", "delivery", c.Delivery.ID)
@@ -298,5 +329,55 @@ func (d *Dispatcher) handle(ctx context.Context, c store.Claim) {
 		}
 		d.storeErrors.Add(1)
 		d.cfg.Log.Error("recording the attempt failed", "delivery", c.Delivery.ID, "error", err)
+	}
+}
+
+// pendingResult is a result waiting to be written, and where to say how it went.
+type pendingResult struct {
+	completion store.Completion
+	reply      chan error
+}
+
+// writeResults collects results into batches and writes each batch in one transaction. A batch is written when it has
+// BatchMax results, or when BatchWindow has passed since its first one, so a lone result waits only a moment. It
+// returns when the channel is closed and every result has been written.
+func (d *Dispatcher) writeResults() {
+	timer := time.NewTimer(time.Hour)
+	defer timer.Stop()
+	for first := range d.out {
+		batch := []pendingResult{first}
+		if !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
+			}
+		}
+		timer.Reset(d.cfg.BatchWindow)
+	collect:
+		for len(batch) < d.cfg.BatchMax {
+			select {
+			case next, ok := <-d.out:
+				if !ok {
+					break collect
+				}
+				batch = append(batch, next)
+			case <-timer.C:
+				break collect
+			}
+		}
+
+		completions := make([]store.Completion, len(batch))
+		for i, p := range batch {
+			completions[i] = p.completion
+		}
+		// Writing must finish whatever the state of the rest of the program, so it has its own deadline.
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		errs := d.store.CompleteBatch(ctx, completions)
+		cancel()
+		d.batches.Add(1)
+		d.results.Add(uint64(len(batch)))
+		for i, p := range batch {
+			p.reply <- errs[i]
+		}
 	}
 }
