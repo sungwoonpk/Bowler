@@ -74,6 +74,7 @@ func (r *receiver) last() received { r.mu.Lock(); defer r.mu.Unlock(); return r.
 
 type harness struct {
 	t    *testing.T
+	api  *Server
 	srv  *httptest.Server
 	st   *store.Store
 	disp *dispatcher.Dispatcher
@@ -115,6 +116,7 @@ func newHarness(t *testing.T, opts ...func(*setup)) *harness {
 	if err != nil {
 		t.Fatal(err)
 	}
+	h.api = api
 	h.srv = httptest.NewServer(api.Handler())
 	t.Cleanup(h.srv.Close)
 	return h

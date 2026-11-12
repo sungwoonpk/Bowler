@@ -8,7 +8,10 @@ package main
 import (
 	"context"
 	"errors"
+	"flag"
 	"fmt"
+	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -50,6 +53,8 @@ func main() {
 			fmt.Fprintln(os.Stderr, "bowler:", err)
 			os.Exit(1)
 		}
+	case "healthcheck":
+		os.Exit(healthcheck(os.Args[2:], os.Getenv, os.Stderr))
 	case "version", "--version", "-v":
 		fmt.Println("bowler", version)
 	case "help", "--help", "-h":
@@ -67,6 +72,7 @@ func usage() {
 Usage:
   bowler serve [flags]    run the service (set BOWLER_API_KEY first)
   bowler demo             run it with sample receivers that fail in different ways
+  bowler healthcheck      exit 0 if a running instance is ready (for container health checks)
   bowler version
 
 Run "bowler serve -h" for the settings.
@@ -148,4 +154,39 @@ func serve(ctx context.Context, cfg config) error {
 	<-dispatcherDone // waits for deliveries in progress, up to the drain time
 	log.Info("stopped")
 	return nil
+}
+
+// healthcheck asks a running instance whether it is ready and returns the exit code to use. Container images with no
+// shell or curl in them cannot run a health check any other way, so the program does it itself.
+func healthcheck(args []string, getenv func(string) string, stderr io.Writer) int {
+	fs := flag.NewFlagSet("healthcheck", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	addr := fs.String("addr", getenv("BOWLER_ADDR"), "address of the instance (BOWLER_ADDR). Default 127.0.0.1:8080")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	host, port, err := net.SplitHostPort(*addr)
+	if err != nil {
+		host, port = "127.0.0.1", "8080"
+		if *addr != "" {
+			fmt.Fprintf(stderr, "healthcheck: %q is not a host:port address\n", *addr)
+			return 2
+		}
+	}
+	// An instance listening on every interface is reached through the loopback address.
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		host = "127.0.0.1"
+	}
+	client := &http.Client{Timeout: 3 * time.Second}
+	resp, err := client.Get("http://" + net.JoinHostPort(host, port) + "/readyz")
+	if err != nil {
+		fmt.Fprintln(stderr, "healthcheck:", err)
+		return 1
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		fmt.Fprintf(stderr, "healthcheck: the instance answered %d\n", resp.StatusCode)
+		return 1
+	}
+	return 0
 }

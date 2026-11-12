@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"sort"
 	"time"
 
 	"github.com/sungwoonpk/bowler/internal/dispatcher"
@@ -46,6 +47,7 @@ type Server struct {
 	log        *slog.Logger
 	failures   *failureTracker
 	mux        *http.ServeMux
+	registered []string // "METHOD /path" for every route, so a test can compare them with the OpenAPI file
 }
 
 // New builds the server. It refuses a configuration that would leave the API unprotected.
@@ -110,8 +112,22 @@ func (p *statusProbe) Header() http.Header         { return p.header }
 func (p *statusProbe) Write(b []byte) (int, error) { return len(b), nil }
 func (p *statusProbe) WriteHeader(code int)        { p.status = code }
 
+// Routes lists every route as "METHOD /path/{param}", the same notation the OpenAPI file uses.
+func (s *Server) Routes() []string {
+	out := append([]string(nil), s.registered...)
+	sort.Strings(out)
+	return out
+}
+
 func (s *Server) routes() {
-	protected := func(pattern string, h handler) { s.mux.HandleFunc(pattern, s.wrap(s.auth(h))) }
+	protected := func(pattern string, h handler) {
+		s.registered = append(s.registered, pattern)
+		s.mux.HandleFunc(pattern, s.wrap(s.auth(h)))
+	}
+	public := func(pattern string, h http.HandlerFunc) {
+		s.registered = append(s.registered, pattern)
+		s.mux.HandleFunc(pattern, h)
+	}
 
 	protected("POST /v1/apps", s.createApp)
 	protected("GET /v1/apps", s.listApps)
@@ -137,11 +153,10 @@ func (s *Server) routes() {
 	protected("POST /v1/apps/{app}/deliveries/{delivery}/replay", s.replayDelivery)
 
 	protected("GET /metrics", s.metrics)
-	s.mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
+	public("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
-	s.mux.HandleFunc("GET /readyz", s.wrap(s.ready))
-
+	public("GET /readyz", s.wrap(s.ready))
 }
 
 func (s *Server) ready(w http.ResponseWriter, r *http.Request) error {

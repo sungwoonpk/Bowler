@@ -338,3 +338,40 @@ func TestSurvivesBeingKilledWhileIdleAndKeepsItsData(t *testing.T) {
 		t.Fatalf("data written before the kill must still be there: %d %v", code, got)
 	}
 }
+
+func TestHealthcheckReflectsWhetherTheInstanceIsReady(t *testing.T) {
+	addr := freeAddr(t)
+	run := func(a string) (int, string) {
+		cmd := exec.Command(binary, "healthcheck", "-addr", a)
+		out, err := cmd.CombinedOutput()
+		if err == nil {
+			return 0, string(out)
+		}
+		return err.(*exec.ExitError).ExitCode(), string(out)
+	}
+	if code, out := run(addr); code != 1 || !strings.Contains(out, "healthcheck:") {
+		t.Fatalf("nothing is running, so it must fail with 1 and say why: %d %q", code, out)
+	}
+	start(t, filepath.Join(t.TempDir(), "bowler.db"), addr)
+	if code, out := run(addr); code != 0 {
+		t.Fatalf("a running instance is healthy: %d %q", code, out)
+	}
+	// An address that listens on every interface is checked through the loopback address.
+	_, port, _ := net.SplitHostPort(addr)
+	if code, out := run("0.0.0.0:" + port); code != 0 {
+		t.Fatalf("0.0.0.0 should be reached via loopback: %d %q", code, out)
+	}
+	if code, _ := run("not an address"); code != 2 {
+		t.Fatalf("a bad address is a usage error, got %d", code)
+	}
+}
+
+func TestHealthcheckUsesTheEnvironmentAddress(t *testing.T) {
+	addr := freeAddr(t)
+	start(t, filepath.Join(t.TempDir(), "bowler.db"), addr)
+	cmd := exec.Command(binary, "healthcheck")
+	cmd.Env = append(os.Environ(), "BOWLER_ADDR="+addr)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("%v %s", err, out)
+	}
+}
