@@ -29,18 +29,18 @@ type Config struct {
 
 // Stats counts what has been deleted since the program started.
 type Stats struct {
-	Sweeps     uint64
-	Messages   uint64
-	Deliveries uint64
-	Attempts   uint64
-	Endpoints  uint64
-	Errors     uint64
+	Sweeps     int64
+	Messages   int64
+	Deliveries int64
+	Attempts   int64
+	Endpoints  int64
+	Errors     int64
 }
 
 // Janitor deletes old data on a schedule.
 type Janitor struct {
 	cfg                                                         Config
-	sweeps, messages, deliveries, attempts, endpoints, failures atomic.Uint64
+	sweeps, messages, deliveries, attempts, endpoints, failures atomic.Int64
 }
 
 // New checks the settings and returns a janitor.
@@ -107,10 +107,10 @@ func (j *Janitor) Sweep(ctx context.Context) (store.PurgeResult, error) {
 	}()
 	for {
 		res, err := j.cfg.Store.Purge(ctx, cutoff, j.cfg.Batch)
-		j.messages.Add(uint64(res.Messages))
-		j.deliveries.Add(uint64(res.Deliveries))
-		j.attempts.Add(uint64(res.Attempts))
-		j.endpoints.Add(uint64(res.Endpoints))
+		j.messages.Add(int64(res.Messages))
+		j.deliveries.Add(int64(res.Deliveries))
+		j.attempts.Add(int64(res.Attempts))
+		j.endpoints.Add(int64(res.Endpoints))
 		total = total.Add(res)
 		if err != nil {
 			j.failures.Add(1)

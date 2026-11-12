@@ -492,14 +492,12 @@ func TestResultsAreWrittenInBatches(t *testing.T) {
 
 func TestARateLimitHoldsBackAnEndpointButEverythingIsStillSent(t *testing.T) {
 	e := newEnv(t)
-	ep, err := e.s.CreateEndpoint(context.Background(), store.NewEndpoint{AppID: e.app.ID, URL: "https://example.com/hook", Concurrency: 20, RatePerSecond: 10, Secret: "whsec_c2VjcmV0"}, time.Now())
+	_, err := e.s.CreateEndpoint(context.Background(), store.NewEndpoint{AppID: e.app.ID, URL: "https://example.com/hook", Concurrency: 20, RatePerSecond: 10, Secret: "whsec_c2VjcmV0"}, time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
-	_ = ep
-	var ids []string
 	for range 25 {
-		ids = append(ids, e.send(t)[0].ID)
+		e.send(t)
 	}
 	var sent atomic.Int32
 	startedAt := time.Now()
