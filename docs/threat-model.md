@@ -45,6 +45,8 @@ someone deciding whether to trust the service, so the gaps are listed as plainly
 | A captured webhook sent again later                         | A timestamp in the signature that the receiver is told to check, and an id that stays the same so repeats are recognizable                      | `signature` tests                   |
 | One app's token used on another app                         | Every route with an app in its path goes through one check, and another app answers `404`, the same as one that does not exist, so tokens cannot be used to find apps | `api` tests, which walk every registered route |
 | A token used where only the operator may                    | Making apps and tokens, listing apps, and metrics take the operator's key only, and the spec says so route by route, checked against the server | `api` tests                         |
+| A copy of the database file handing out signing secrets     | With an encryption key, secrets are sealed with AES-256-GCM and tied to their row, and the file is compacted so no plain text stays in it. The program refuses to start with a missing or wrong key | `secretbox`, `store`, `cmd` tests (the last reads the file) |
+| A token that can do more than it should                     | A token can be read only, which may not change anything and may not read a signing secret, and can expire. A test walks every route with a read-only token | `api` tests                         |
 | A copy of the database handing out tokens                   | Only a SHA-256 hash of each token is stored, and the token is shown once                                                                        | `store`, `api` tests                |
 | A leaked token that must stop at once                       | Revoking takes effect on the next request, since every request looks the token up                                                               | `api` tests                         |
 | Nobody knowing who changed an endpoint or read a secret     | An audit log of changes, secret reads and rotations, naming the operator or the token, with no secrets or values in it                           | `store`, `api` tests                |
@@ -67,18 +69,19 @@ someone deciding whether to trust the service, so the gaps are listed as plainly
 
 These are real gaps. Read them before relying on the service.
 
-- **Signing secrets are stored in the clear** in the SQLite file. They have to be readable to sign with. Anyone who can read the file
-  can forge webhooks to every endpoint. Keep the file on an encrypted volume that only the service can read. Encrypting the secrets
-  with a key kept outside the file is on the roadmap.
+- **Signing secrets are encrypted only if `BOWLER_ENCRYPTION_KEY` is set.** Without it they are stored in the clear, and anyone who
+  can read the file can forge webhooks to every endpoint. With it, a copy of the file is not enough. The key is in the
+  environment of the running program, so someone who can read that process's memory or environment still gets every secret. If the
+  key is lost, the secrets are lost. Backups from before encryption was turned on still hold them in the clear.
 - **Payloads and the first kilobyte of each reply are stored** in the file too, and may contain personal data. They are deleted
   after the retention period (30 days unless changed), but until then they sit in the clear, and a backup taken earlier keeps
   them. Deleted rows do not shrink the file, and the space is reused until a `VACUUM`, so deleted text may still be in the file
   on disk.
 - **The API key is all-powerful.** There are no roles for operators, and the audit log shows the key only as `admin`, so two people
   sharing it cannot be told apart. Put Bowler behind your own backend, and do not hand the key to anything you do not trust fully.
-- **A token has the whole authority of its app.** There are no read-only tokens or narrower scopes. A token can read and rotate
-  signing secrets and create endpoints, so it is for the app's own side. It does not expire until revoked, and the service does
-  not record when it was last used.
+- **A full token has the whole authority of its app.** It can read and rotate signing secrets and create endpoints, so it is for
+  the app's own side. A token can be made read only (which also refuses reading a signing secret) and can be made to expire, and
+  there is nothing between read and full. When it was last used is recorded only to within ten minutes.
 - **The audit entry is written after the action.** If writing it fails, the action has happened and the entry is missing. The
   failure is logged and counted in `bowler_audit_errors_total`. Refused requests are not in the audit log, only in the request log.
   An operator with access to the database file can still edit it, since it is not signed or sent anywhere else.

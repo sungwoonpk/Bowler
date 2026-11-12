@@ -1,6 +1,7 @@
 package dispatcher
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/sungwoonpk/bowler/internal/deliver"
 	"github.com/sungwoonpk/bowler/internal/domain"
+	"github.com/sungwoonpk/bowler/internal/secretbox"
 	"github.com/sungwoonpk/bowler/internal/ssrf"
 	"github.com/sungwoonpk/bowler/internal/store"
 )
@@ -23,9 +25,9 @@ import (
 //	go test ./internal/dispatcher -run '^$' -bench . -benchtime 3000x -count 3
 const fanOut = 10
 
-func benchSetup(b *testing.B, urls func(i int) string) (*store.Store, domain.App) {
+func benchSetup(b *testing.B, urls func(i int) string, opts ...store.Option) (*store.Store, domain.App) {
 	b.Helper()
-	s, err := store.Open(filepath.Join(b.TempDir(), "bench.db"))
+	s, err := store.Open(filepath.Join(b.TempDir(), "bench.db"), opts...)
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -42,8 +44,8 @@ func benchSetup(b *testing.B, urls func(i int) string) (*store.Store, domain.App
 	return s, app
 }
 
-func runEndToEnd(b *testing.B, sender Sender, urls func(int) string) {
-	s, app := benchSetup(b, urls)
+func runEndToEnd(b *testing.B, sender Sender, urls func(int) string, opts ...store.Option) {
+	s, app := benchSetup(b, urls, opts...)
 	d, err := New(s, sender, Config{Workers: 128, PollInterval: 5 * time.Millisecond, AttemptTimeout: 5 * time.Second, LeaseFor: 30 * time.Second})
 	if err != nil {
 		b.Fatal(err)
@@ -103,4 +105,14 @@ func BenchmarkHTTP(b *testing.B) {
 	// How many new connections the receiver had to accept for each thousand deliveries. Reusing connections keeps this
 	// low. A high number means connections are opened and closed for nearly every request.
 	b.ReportMetric(float64(connections.Load())/float64(b.N*fanOut)*1000, "conns/1000-deliveries")
+}
+
+// BenchmarkQueueEncrypted is BenchmarkQueue with signing secrets sealed in the database, to show what encryption costs.
+func BenchmarkQueueEncrypted(b *testing.B) {
+	box, err := secretbox.New(bytes.Repeat([]byte{7}, secretbox.KeySize))
+	if err != nil {
+		b.Fatal(err)
+	}
+	instant := fakeSender(func(_ context.Context, c store.Claim) deliver.Outcome { return ok(c) })
+	runEndToEnd(b, instant, func(int) string { return "https://example.com/hook" }, store.WithSecretBox(box))
 }

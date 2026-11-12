@@ -103,10 +103,11 @@ curl -s localhost:8080/v1/apps/acme-1/messages -H "authorization: Bearer $BOWLER
 
 ```bash
 curl -s localhost:8080/v1/apps/acme-1/tokens -H "authorization: Bearer $BOWLER_API_KEY" -H "content-type: application/json" \
-  -d '{"name": "customer portal"}'
-# the response includes "token": "bwl_...", shown once. Only its hash is kept.
+  -d '{"name": "customer portal", "scope": "read", "expires_in_hours": 720}'
+# scope and expiry are optional. The response includes "token": "bwl_...", shown once. Only its hash is kept.
 
 curl -s localhost:8080/v1/apps/acme-1/endpoints -H "authorization: Bearer bwl_..."    # works
+curl -s -X POST localhost:8080/v1/apps/acme-1/endpoints -H "authorization: Bearer bwl_..." -d '{}'   # 403 read_only, this token is read only
 curl -s localhost:8080/v1/apps/other-app/endpoints -H "authorization: Bearer bwl_..."  # 404, as if the app did not exist
 curl -s localhost:8080/v1/apps/acme-1/audit-log -H "authorization: Bearer bwl_..."     # who did what
 curl -s -X DELETE localhost:8080/v1/apps/acme-1/tokens/tok_... -H "authorization: Bearer $BOWLER_API_KEY"   # revoked at once
@@ -165,7 +166,8 @@ Receivers in other languages can use any Standard Webhooks library. Answer `2xx`
 
 - **Signing.** `webhook-id`, `webhook-timestamp` and `webhook-signature`, as Standard Webhooks describes. Rotating a secret sends two signatures for a grace period, so receivers can switch without losing a message. The `signature` package has no dependencies. [0002](docs/decisions/0002-standard-webhooks-signing.md)
 - **SSRF protection.** https only, and no private, loopback or metadata addresses, checked when a URL is registered and again on the address actually dialled. Redirects are not followed and proxies from the environment are ignored. [0003](docs/decisions/0003-ssrf-at-connection-time.md)
-- **Tokens for one app.** The operator's key can make a token for an app. It is shown once and only its hash is stored. It works on that app and no other, another app looks the same as one that does not exist, and it can be revoked at once. That is what a page for your customers needs, since such a page cannot hold a key that reads everyone's data. [0009](docs/decisions/0009-app-tokens-and-audit-log.md)
+- **Encrypted signing secrets.** Set `BOWLER_ENCRYPTION_KEY` and the secrets are sealed with AES-256-GCM in the database file, so a copy of the file or a backup cannot forge webhooks. Turning it on, rotating the key and checking the key all happen in one pass at start. [0010](docs/decisions/0010-encrypted-signing-secrets.md)
+- **Tokens for one app.** The operator's key can make a token for an app. It is shown once and only its hash is stored. It works on that app and no other, another app looks the same as one that does not exist, and it can be revoked at once. A token can be **read only** (it cannot change anything, nor read a signing secret) and can **expire**. That is what a page for your customers needs, since such a page cannot hold a key that reads everyone's data. [0009](docs/decisions/0009-app-tokens-and-audit-log.md)
 - **An audit log.** Endpoint changes, token creation and revocation, every read or rotation of a signing secret, `recover` and replay are recorded with who did them (the operator, or a token), the resource and the request id. Updates list the fields changed, never the values.
 
 **Data**
@@ -180,11 +182,13 @@ Receivers in other languages can use any Standard Webhooks library. Answer `2xx`
 
 ## Configuration
 
-Every setting is a flag, and all but the API key also have an environment variable. A flag beats the variable, which beats the default.
+Every setting is a flag and an environment variable, except the three keys, which are environment only so that they do not show in the process list. A flag beats the variable, which beats the default.
 
 | Flag                | Environment              | Default            | Meaning                                                                                       |
 | ------------------- | ------------------------ | ------------------ | --------------------------------------------------------------------------------------------- |
 | _(none)_            | `BOWLER_API_KEY`         | required           | At least 24 characters. Environment only: a flag would show in the process list               |
+| _(none)_            | `BOWLER_ENCRYPTION_KEY`  | off                | 32 bytes as base64 (`openssl rand -base64 32`). Seals the signing secrets in the database. Environment only |
+| _(none)_            | `BOWLER_ENCRYPTION_KEY_PREVIOUS` | off        | The key being replaced, while rotating. Environment only                                      |
 | `--addr`            | `BOWLER_ADDR`            | `127.0.0.1:8080`   | Where to listen. Use `0.0.0.0:8080` only behind a proxy                                       |
 | `--db`              | `BOWLER_DB`              | `bowler.db`        | The SQLite file                                                                               |
 | `--workers`         | `BOWLER_WORKERS`         | `128`              | Most deliveries in progress at once                                                           |
@@ -206,7 +210,7 @@ Every setting is a flag, and all but the API key also have an environment variab
 | A message that got `202` is not lost, even if the process is killed                                            | Exactly once. A crash or a slow answer can cause a repeat, so receivers must ignore a `webhook-id` they know |
 | Every attempt is recorded, with its status, duration and failure reason                                        | A particular order. A retry can be overtaken by a newer message                                              |
 | One endpoint cannot use more than its concurrency of the workers, or start attempts faster than its rate limit | That a receiver is reachable. A receiver on a private network needs the development flag                     |
-| Secrets, tokens and API keys are never written to the log or the audit log                                     | Encryption of the database. Signing secrets and payloads are stored as they are                              |
+| Secrets, tokens and API keys are never written to the log or the audit log                                     | Encryption of payloads. Only signing secrets are encrypted, and only if you set a key                        |
 | Finished data is deleted after the retention period                                                            | That the file gets smaller. Deleted space is reused, and shrinking the file needs a `VACUUM`                 |
 
 What this version does not do:
@@ -214,9 +218,10 @@ What this version does not do:
 **Security and access**
 
 - The operator's API key can do everything, and the audit log shows it only as `admin`, so people who share it cannot be told apart.
-- A token has the whole authority of its app: no read-only tokens, no expiry, and no record of last use.
+- A full token has the whole authority of its app. A token can be read only or can expire, and there is nothing in between. When it was last used is recorded only to within ten minutes.
 - The audit entry is written after the action, not in the same transaction. A failed write is logged and counted in `bowler_audit_errors_total`, and the entry is missing.
-- Signing secrets and payloads are stored unencrypted. Payloads are deleted after the retention period, but until then they are in the clear, so use an encrypted volume.
+- Without `BOWLER_ENCRYPTION_KEY`, signing secrets are stored in the clear. With it, the key is in the running program's environment, so it protects a copy of the file and not a person on the machine, and if the key is lost the secrets are lost.
+- Payloads and the start of each receiver's reply are never encrypted. They are deleted after the retention period, but until then they are in the clear, so use an encrypted volume.
 - No TLS and no rate limit on the API itself. Put it behind a proxy. The per-endpoint rate limit protects receivers, not the API.
 - A receiver on a private network cannot be reached without the global development flag, which removes the SSRF protection. There is no per-endpoint allow list yet.
 - HMAC signatures only. The specification's asymmetric `v1a` scheme is not implemented.
@@ -262,7 +267,7 @@ The ceiling is still SQLite's single writer, only higher. Moving to a networked 
 make check       # format, vet, staticcheck, errcheck, gosec, race tests with coverage, vulnerabilities
 ```
 
-- **204 tests** run with the race detector, and the libraries have **92% coverage**. CI fails under 85%.
+- **236 tests** run with the race detector, and the libraries have **92% coverage**. CI fails under 85%.
 - **A test that kills the real program.** It starts `bowler serve` as a separate process, sends twenty messages to a receiver that holds its requests open, waits until deliveries are in flight, kills the process with `kill -9`, starts it again on the same database, and checks that every message reaches the customer.
 - **Concurrency.** Twelve workers share one queue and each delivery is handed out exactly once. Three dispatchers share a queue and nothing is sent twice. A slow endpoint with two hundred deliveries behind it does not delay a healthy one.
 - **Failure handling.** Every status class, timeouts, refused connections, DNS failures, bad certificates, redirects, a reply that never ends, a sender that panics, a lease that is lost, shutdown mid-attempt.
@@ -283,6 +288,7 @@ Bowler/
 │   ├── dispatcher/       runs the queue, writes results in batches, shuts down in order
 │   ├── retention/        deletes finished data and old audit entries after their retention periods
 │   ├── token/            makes app tokens and the hashes that are stored
+│   ├── secretbox/        seals signing secrets with a key from outside the database
 │   ├── deliver/          one attempt, and a verdict
 │   ├── ssrf/             which addresses may be called
 │   ├── api/              the HTTP interface, one file per resource
@@ -306,14 +312,15 @@ Bowler/
 | 0007 | [An endpoint can be limited to a number of attempts per second](docs/decisions/0007-per-endpoint-rate-limit.md)                  |
 | 0008 | [Finished data is deleted after a retention period](docs/decisions/0008-retention.md)                                            |
 | 0009 | [An app can be given a token that works on that app only, and what is done is recorded](docs/decisions/0009-app-tokens-and-audit-log.md) |
+| 0010 | [Signing secrets are encrypted in the database when a key is given](docs/decisions/0010-encrypted-signing-secrets.md) |
 
 Contributing is described in [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Roadmap
 
 1. Postgres, and more than one node
-2. Encrypt secrets at rest, and a retention period per app
-3. Named operator credentials, read-only and expiring tokens, and the audit entry in the same transaction as the change
+2. A retention period per app, and encrypting payloads
+3. Named operator credentials, and the audit entry in the same transaction as the change
 4. A page for your customers to manage endpoints and read their delivery log, using tokens
 5. Wake the dispatcher exactly when a rate limit allows more, instead of on the next poll
 6. Asymmetric `v1a` signatures, and a per-endpoint allow list for private receivers

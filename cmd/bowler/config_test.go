@@ -153,3 +153,26 @@ func TestAuditRetentionCanBeChangedOrSwitchedOff(t *testing.T) {
 		t.Fatalf("%+v %v", c, err)
 	}
 }
+
+func TestEncryptionKeysComeFromTheEnvironmentOnly(t *testing.T) {
+	vars := map[string]string{"BOWLER_API_KEY": goodKey}
+	if c, err := parse(t, nil, vars); err != nil || c.EncryptionKey != nil {
+		t.Fatalf("encryption is off unless a key is given: %+v %v", c, err)
+	}
+	vars["BOWLER_ENCRYPTION_KEY"] = keyOne
+	c, err := parse(t, nil, vars)
+	if err != nil || len(c.EncryptionKey) != 32 || c.EncryptionKeyPrevious != nil {
+		t.Fatalf("%+v %v", c, err)
+	}
+	vars["BOWLER_ENCRYPTION_KEY_PREVIOUS"] = keyTwo
+	if c, err := parse(t, nil, vars); err != nil || len(c.EncryptionKeyPrevious) != 32 {
+		t.Fatalf("%+v %v", c, err)
+	}
+	if _, err := parse(t, []string{"-encryption-key", keyOne}, map[string]string{"BOWLER_API_KEY": goodKey}); err == nil {
+		t.Error("a key must not be accepted as a flag, it would show in the process list")
+	}
+	delete(vars, "BOWLER_ENCRYPTION_KEY")
+	if _, err := parse(t, nil, vars); err == nil {
+		t.Error("a previous key without a current one makes no sense")
+	}
+}

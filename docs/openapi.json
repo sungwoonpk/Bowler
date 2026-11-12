@@ -3,7 +3,7 @@
   "info": {
     "title": "Bowler",
     "version": "0.1.0",
-    "description": "Bowler delivers webhooks for a company that wants to send events to its own customers' servers. It signs each one following the Standard Webhooks specification, retries failures on a schedule, never lets one slow receiver hold up the others, and keeps the history of every attempt.\n\n**Vocabulary.** An *app* is one of your own customers. An *endpoint* is a URL that app wants events sent to. A *message* is one event. A *delivery* is one message going to one endpoint, and an *attempt* is one try at a delivery.\n\n**Delivery guarantee.** At least once. A crash or a retry can cause the same message to arrive twice, so a receiver should ignore a `webhook-id` it has already seen. A message is never lost once the API has answered `202`.\n\n**Retention.** Finished messages, with their deliveries and attempts, are deleted after the operator's retention period, 30 days by default. A message that still has work to do is never deleted.\n\n**Credentials.** The operator's API key can do everything. An app's own side can be given a *token* instead, made with `POST /v1/apps/{app}/tokens`: it works on that app only, and another app looks the same as one that does not exist. The routes that make apps and tokens, and the metrics, take the operator's key only.\n\n**Audit log.** Changes to endpoints and tokens, and every read or rotation of a signing secret, are recorded with who did them. See `GET /v1/apps/{app}/audit-log`."
+    "description": "Bowler delivers webhooks for a company that wants to send events to its own customers' servers. It signs each one following the Standard Webhooks specification, retries failures on a schedule, never lets one slow receiver hold up the others, and keeps the history of every attempt.\n\n**Vocabulary.** An *app* is one of your own customers. An *endpoint* is a URL that app wants events sent to. A *message* is one event. A *delivery* is one message going to one endpoint, and an *attempt* is one try at a delivery.\n\n**Delivery guarantee.** At least once. A crash or a retry can cause the same message to arrive twice, so a receiver should ignore a `webhook-id` it has already seen. A message is never lost once the API has answered `202`.\n\n**Retention.** Finished messages, with their deliveries and attempts, are deleted after the operator's retention period, 30 days by default. A message that still has work to do is never deleted.\n\n**Credentials.** The operator's API key can do everything. An app's own side can be given a *token* instead, made with `POST /v1/apps/{app}/tokens`: it works on that app only, and another app looks the same as one that does not exist. A token can be made read only, and can be made to expire. The routes that make apps and tokens, and the metrics, take the operator's key only.\n\n**Audit log.** Changes to endpoints and tokens, and every read or rotation of a signing secret, are recorded with who did them. See `GET /v1/apps/{app}/audit-log`.\n\n**Signing secrets at rest.** If the operator sets an encryption key, signing secrets are stored encrypted. This does not change the API."
   },
   "servers": [
     {
@@ -410,6 +410,16 @@
                 }
               }
             }
+          },
+          "403": {
+            "description": "The token is read only. A read-only token may look and may not change anything, and may not read a signing secret.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           }
         }
       },
@@ -676,6 +686,16 @@
                 }
               }
             }
+          },
+          "403": {
+            "description": "The token is read only. A read-only token may look and may not change anything, and may not read a signing secret.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           }
         }
       },
@@ -730,6 +750,16 @@
           },
           "404": {
             "description": "There is no such resource, or it belongs to another app.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The token is read only. A read-only token may look and may not change anything, and may not read a signing secret.",
             "content": {
               "application/json": {
                 "schema": {
@@ -805,6 +835,16 @@
           },
           "404": {
             "description": "There is no such resource, or it belongs to another app.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The token is read only. A read-only token may look and may not change anything, and may not read a signing secret.",
             "content": {
               "application/json": {
                 "schema": {
@@ -910,6 +950,16 @@
                 }
               }
             }
+          },
+          "403": {
+            "description": "The token is read only. A read-only token may look and may not change anything, and may not read a signing secret.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           }
         }
       }
@@ -1000,6 +1050,16 @@
           },
           "404": {
             "description": "There is no such resource, or it belongs to another app.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The token is read only. A read-only token may look and may not change anything, and may not read a signing secret.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1208,6 +1268,16 @@
           },
           "413": {
             "description": "The request body is too large.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The token is read only. A read-only token may look and may not change anything, and may not read a signing secret.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1693,6 +1763,16 @@
                 }
               }
             }
+          },
+          "403": {
+            "description": "The token is read only. A read-only token may look and may not change anything, and may not read a signing secret.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           }
         }
       }
@@ -1862,6 +1942,21 @@
                     "type": "string",
                     "maxLength": 100,
                     "description": "What the token is for, so it can be told apart and revoked later."
+                  },
+                  "scope": {
+                    "type": "string",
+                    "enum": [
+                      "full",
+                      "read"
+                    ],
+                    "default": "full",
+                    "description": "`read` makes a token that may look and change nothing. It cannot read a signing secret either, since that is the power to forge webhooks."
+                  },
+                  "expires_in_hours": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 8760,
+                    "description": "The token stops working after this many hours. Leave out for a token that does not expire."
                   }
                 }
               }
@@ -2405,7 +2500,7 @@
       "appToken": {
         "type": "http",
         "scheme": "bearer",
-        "description": "A token made for one app with `POST /v1/apps/{app}/tokens`. It starts with `bwl_` and works on that app's routes only: its endpoints, messages, deliveries and audit log. It cannot make apps or tokens, read metrics or see another app, and another app looks the same as one that does not exist. Safe to give to that app's own side, such as a settings page for its customers."
+        "description": "A token made for one app with `POST /v1/apps/{app}/tokens`. It starts with `bwl_` and works on that app's routes only: its endpoints, messages, deliveries and audit log. It cannot make apps or tokens, read metrics or see another app, and another app looks the same as one that does not exist. A token made with `\"scope\": \"read\"` may look and change nothing, and cannot read a signing secret. A token made with `expires_in_hours` stops working after that time. Safe to give to that app's own side, such as a settings page for its customers."
       }
     },
     "parameters": {
@@ -2757,6 +2852,24 @@
             "type": "string",
             "format": "date-time",
             "description": "Present once the token has been revoked."
+          },
+          "scope": {
+            "type": "string",
+            "enum": [
+              "full",
+              "read"
+            ],
+            "description": "`full` can do everything its app may. `read` can look and change nothing, and cannot read a signing secret."
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the token stops working. Absent for a token that does not expire."
+          },
+          "last_used_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Roughly when the token was last used, to within ten minutes. Absent if it never was."
           }
         }
       },

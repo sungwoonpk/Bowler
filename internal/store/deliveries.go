@@ -191,7 +191,7 @@ func (s *Store) RecoverEndpoint(ctx context.Context, appID, endpointID string, s
 	now = now.UTC().Truncate(time.Millisecond)
 	var replayed int
 	err := s.withTx(ctx, func(tx *sql.Tx) error {
-		ep, err := scanEndpoint(tx.QueryRowContext(ctx,
+		ep, err := s.scanEndpoint(tx.QueryRowContext(ctx,
 			"SELECT "+endpointColumns+" FROM endpoints WHERE id = ? AND app_id = ? AND deleted_at IS NULL", endpointID, appID))
 		if errors.Is(err, sql.ErrNoRows) {
 			return ErrNotFound

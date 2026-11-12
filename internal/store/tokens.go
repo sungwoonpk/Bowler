@@ -17,48 +17,82 @@ const MaxActiveTokensPerApp = 50
 // ErrTooManyTokens is returned when an app already holds the most working tokens.
 var ErrTooManyTokens = errors.New("store: the app already has the most tokens it may hold")
 
-const tokenColumns = "id, app_id, name, token_prefix, created_at, revoked_at" // #nosec G101 -- a list of column names, not a credential
+const tokenColumns = "id, app_id, name, token_prefix, scope, created_at, revoked_at, expires_at, last_used_at" // #nosec G101 -- a list of column names, not a credential
 
 func scanToken(r scanner) (domain.AppToken, error) {
 	var (
-		t       domain.AppToken
-		created int64
-		revoked sql.NullInt64
+		t                          domain.AppToken
+		created                    int64
+		revoked, expires, lastUsed sql.NullInt64
 	)
-	if err := r.Scan(&t.ID, &t.AppID, &t.Name, &t.Prefix, &created, &revoked); err != nil {
+	if err := r.Scan(&t.ID, &t.AppID, &t.Name, &t.Prefix, &t.Scope, &created, &revoked, &expires, &lastUsed); err != nil {
 		return domain.AppToken{}, err
 	}
 	t.CreatedAt = fromMS(created)
 	t.RevokedAt = optMS(revoked)
+	t.ExpiresAt = optMS(expires)
+	t.LastUsedAt = optMS(lastUsed)
 	return t, nil
 }
 
+// NewAppToken describes a token to store. Only the hash of the token is given, never the token.
+type NewAppToken struct {
+	AppID  string
+	Name   string
+	Hash   string
+	Prefix string
+	// Scope is domain.ScopeFull or domain.ScopeRead. Empty means full.
+	Scope string
+	// ExpiresAt is when the token stops working. Nil for never.
+	ExpiresAt *time.Time
+}
+
 // CreateAppToken stores the hash of a new token for an app. The token itself is never stored.
-func (s *Store) CreateAppToken(ctx context.Context, appID, name, hash, prefix string, now time.Time) (domain.AppToken, error) {
-	t := domain.AppToken{ID: id.New(id.Token), AppID: appID, Name: name, Prefix: prefix, CreatedAt: now.UTC().Truncate(time.Millisecond)}
+func (s *Store) CreateAppToken(ctx context.Context, n NewAppToken, now time.Time) (domain.AppToken, error) {
+	if n.Scope == "" {
+		n.Scope = domain.ScopeFull
+	}
+	t := domain.AppToken{ID: id.New(id.Token), AppID: n.AppID, Name: n.Name, Prefix: n.Prefix, Scope: n.Scope,
+		CreatedAt: now.UTC().Truncate(time.Millisecond)}
+	if n.ExpiresAt != nil {
+		e := n.ExpiresAt.UTC().Truncate(time.Millisecond)
+		t.ExpiresAt = &e
+	}
 	err := s.withTx(ctx, func(tx *sql.Tx) error {
+		// A token that has expired no longer counts toward the limit.
 		var active int
-		if err := tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM app_tokens WHERE app_id = ? AND revoked_at IS NULL", appID).Scan(&active); err != nil {
+		if err := tx.QueryRowContext(ctx,
+			"SELECT COUNT(*) FROM app_tokens WHERE app_id = ? AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > ?)",
+			n.AppID, ms(now)).Scan(&active); err != nil {
 			return err
 		}
 		if active >= MaxActiveTokensPerApp {
 			return ErrTooManyTokens
 		}
 		_, err := tx.ExecContext(ctx,
-			"INSERT INTO app_tokens (id, app_id, name, token_hash, token_prefix, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-			t.ID, t.AppID, t.Name, hash, t.Prefix, ms(t.CreatedAt))
+			"INSERT INTO app_tokens (id, app_id, name, token_hash, token_prefix, scope, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+			t.ID, t.AppID, t.Name, n.Hash, t.Prefix, t.Scope, ms(t.CreatedAt), nullMS(t.ExpiresAt))
 		return err
 	})
 	return t, err
 }
 
-// AppTokenByHash finds a token that still works. A revoked token is not found.
-func (s *Store) AppTokenByHash(ctx context.Context, hash string) (domain.AppToken, error) {
-	t, err := scanToken(s.db.QueryRowContext(ctx, "SELECT "+tokenColumns+" FROM app_tokens WHERE token_hash = ? AND revoked_at IS NULL", hash))
+// AppTokenByHash finds a token that works at the given moment. A revoked or expired token is not found.
+func (s *Store) AppTokenByHash(ctx context.Context, hash string, now time.Time) (domain.AppToken, error) {
+	t, err := scanToken(s.db.QueryRowContext(ctx,
+		"SELECT "+tokenColumns+" FROM app_tokens WHERE token_hash = ? AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > ?)", hash, ms(now)))
 	if errors.Is(err, sql.ErrNoRows) {
 		return domain.AppToken{}, ErrNotFound
 	}
 	return t, err
+}
+
+// TouchAppToken records that a token was used. It is meant to be called rarely for each token.
+func (s *Store) TouchAppToken(ctx context.Context, tokenID string, now time.Time) error {
+	return s.withTx(ctx, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, "UPDATE app_tokens SET last_used_at = ? WHERE id = ?", ms(now), tokenID)
+		return err
+	})
 }
 
 // GetAppToken returns one token of an app, revoked or not.

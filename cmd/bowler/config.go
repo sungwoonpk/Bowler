@@ -11,20 +11,26 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/sungwoonpk/bowler/internal/secretbox"
 )
 
 // config is everything `bowler serve` needs, gathered from flags and the environment.
 type config struct {
-	Addr         string
-	DB           string
-	APIKey       string
-	AllowPrivate bool
-	AllowHTTP    bool
-	Workers      int
-	Timeout      time.Duration
-	Lease        time.Duration
-	Drain        time.Duration
-	MaxPayload   int
+	Addr   string
+	DB     string
+	APIKey string
+	// EncryptionKey seals signing secrets in the database. Nil leaves them as they are. EncryptionKeyPrevious is the key
+	// being rotated out, still needed to open what it sealed. Both come from the environment only.
+	EncryptionKey         []byte
+	EncryptionKeyPrevious []byte
+	AllowPrivate          bool
+	AllowHTTP             bool
+	Workers               int
+	Timeout               time.Duration
+	Lease                 time.Duration
+	Drain                 time.Duration
+	MaxPayload            int
 	// Retention is how long finished data is kept. Zero keeps it for ever.
 	Retention time.Duration
 	// AuditRetention is how long the audit log is kept. Zero keeps it for ever.
@@ -86,6 +92,24 @@ func parseServe(args []string, getenv func(string) string, stderr io.Writer) (co
 	c.APIKey = getenv("BOWLER_API_KEY")
 	if len(c.APIKey) < minAPIKey {
 		return c, errors.New("BOWLER_API_KEY must be set to at least 24 characters. Make one with: openssl rand -hex 24")
+	}
+	// Like the API key, the encryption key can only come from the environment, and its value is never put in an error.
+	if v := getenv("BOWLER_ENCRYPTION_KEY"); v != "" {
+		k, err := secretbox.ParseKey(v)
+		if err != nil {
+			return c, fmt.Errorf("BOWLER_ENCRYPTION_KEY: %w", err)
+		}
+		c.EncryptionKey = k
+	}
+	if v := getenv("BOWLER_ENCRYPTION_KEY_PREVIOUS"); v != "" {
+		if c.EncryptionKey == nil {
+			return c, errors.New("BOWLER_ENCRYPTION_KEY_PREVIOUS is only for rotating: set BOWLER_ENCRYPTION_KEY to the new key as well")
+		}
+		k, err := secretbox.ParseKey(v)
+		if err != nil {
+			return c, fmt.Errorf("BOWLER_ENCRYPTION_KEY_PREVIOUS: %w", err)
+		}
+		c.EncryptionKeyPrevious = k
 	}
 	if _, _, err := net.SplitHostPort(c.Addr); err != nil {
 		return c, fmt.Errorf("--addr %q is not a host:port address", c.Addr)

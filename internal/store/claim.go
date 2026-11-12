@@ -193,7 +193,7 @@ func (s *Store) ClaimDue(ctx context.Context, now time.Time, leaseFor time.Durat
 		}
 		defer joined.Close()
 		for joined.Next() {
-			c, err := scanClaim(joined)
+			c, err := s.scanClaim(joined)
 			if err != nil {
 				return err
 			}
@@ -207,7 +207,7 @@ func (s *Store) ClaimDue(ctx context.Context, now time.Time, leaseFor time.Durat
 	return claims, nil
 }
 
-func scanClaim(r scanner) (Claim, error) {
+func (s *Store) scanClaim(r scanner) (Claim, error) {
 	var (
 		d                       domain.Delivery
 		state                   string
@@ -247,6 +247,10 @@ func scanClaim(r scanner) (Claim, error) {
 		if err := json.Unmarshal([]byte(types.String), &e.EventTypes); err != nil {
 			return Claim{}, err
 		}
+	}
+
+	if err := s.openSecrets(&e); err != nil {
+		return Claim{}, err
 	}
 
 	m.Payload = json.RawMessage(payload)

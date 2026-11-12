@@ -337,3 +337,189 @@ func TestMetricsAreForTheOperatorOnly(t *testing.T) {
 	}
 	_ = http.StatusOK
 }
+
+func (h *harness) tokenWith(app string, body map[string]any) (secret, id string) {
+	h.t.Helper()
+	r := h.do("POST", "/v1/apps/"+app+"/tokens", body)
+	if r.status != 201 {
+		h.t.Fatalf("making a token: %d %s", r.status, r.raw)
+	}
+	return str(r.body, "token"), str(r.body, "id")
+}
+
+func TestAReadOnlyTokenLooksAndChangesNothing(t *testing.T) {
+	h := newHarness(t, func(s *setup) { s.noWorker = true })
+	app := h.app("a")
+	rc := newReceiver(t)
+	ep, _ := h.endpoint(app, rc.srv.URL, nil)
+	tok, _ := h.tokenWith(app, map[string]any{"name": "viewer", "scope": "read"})
+	base := "/v1/apps/" + app + "/endpoints/" + ep
+
+	for _, path := range []string{"/v1/apps/" + app, "/v1/apps/" + app + "/endpoints", base, "/v1/apps/" + app + "/messages", "/v1/apps/" + app + "/audit-log"} {
+		if r := h.do("GET", path, nil, bearer(tok)...); r.status != 200 {
+			t.Errorf("GET %s: a read-only token may look, got %d", path, r.status)
+		}
+	}
+	for name, req := range map[string][3]any{
+		"create endpoint": {"POST", "/v1/apps/" + app + "/endpoints", map[string]any{"url": rc.srv.URL}},
+		"update endpoint": {"PATCH", base, map[string]any{"description": "x"}},
+		"delete endpoint": {"DELETE", base, nil},
+		"rotate":          {"POST", base + "/secret/rotate", nil},
+		"recover":         {"POST", base + "/recover", nil},
+		"send":            {"POST", "/v1/apps/" + app + "/messages", map[string]any{"event_type": "x", "payload": map[string]any{}}},
+	} {
+		r := h.do(req[0].(string), req[1].(string), req[2], bearer(tok)...)
+		if r.status != 403 || str(r.body["error"].(map[string]any), "code") != "read_only" {
+			t.Errorf("%s: a read-only token must not change anything, got %d %s", name, r.status, r.raw)
+		}
+	}
+	// Reading the signing secret is a GET, and it is the power to forge webhooks, so it is refused as well.
+	if r := h.do("GET", base+"/secret", nil, bearer(tok)...); r.status != 403 || strings.Contains(string(r.raw), "whsec_") {
+		t.Fatalf("a read-only token must not read a signing secret: %d %s", r.status, r.raw)
+	}
+	// And none of it happened.
+	if r := h.do("GET", base, nil); str(r.body, "description") != "" {
+		t.Fatalf("the endpoint was changed: %s", r.raw)
+	}
+	if log := entries(t, h.do("GET", "/v1/apps/"+app+"/audit-log?action=endpoint.secret_read", nil)); len(log) != 0 {
+		t.Fatalf("a refused secret read leaves no entry: %v", log)
+	}
+}
+
+// Walk the routes so that a route added later cannot forget that a read-only token may not change things.
+func TestNoRouteLetsAReadOnlyTokenChangeAnything(t *testing.T) {
+	h := newHarness(t, func(s *setup) { s.noWorker = true })
+	app := h.app("a")
+	rc := newReceiver(t)
+	ep, _ := h.endpoint(app, rc.srv.URL, nil)
+	tok, _ := h.tokenWith(app, map[string]any{"name": "viewer", "scope": "read"})
+	fill := strings.NewReplacer("{app}", app, "{endpoint}", ep, "{message}", "msg_aaaaaaaaaaaaaaaaaaaa",
+		"{delivery}", "dlv_aaaaaaaaaaaaaaaaaaaa", "{token}", "tok_aaaaaaaaaaaaaaaaaaaa")
+	checked := 0
+	for _, route := range h.api.Routes() {
+		method, path, _ := strings.Cut(route, " ")
+		if path == "/healthz" || path == "/readyz" || !strings.Contains(path, "{app}") {
+			continue
+		}
+		var body any
+		if method == "POST" || method == "PATCH" {
+			body = map[string]any{}
+		}
+		r := h.do(method, fill.Replace(path), body, bearer(tok)...)
+		switch {
+		case method != "GET":
+			if r.status != 403 {
+				t.Errorf("%s with a read-only token answered %d: %s", route, r.status, r.raw)
+			}
+		case strings.HasSuffix(path, "/secret"):
+			if r.status != 403 {
+				t.Errorf("%s with a read-only token answered %d: %s", route, r.status, r.raw)
+			}
+		case strings.HasSuffix(path, "/tokens"):
+			if r.status != 403 {
+				t.Errorf("%s is the operator's: %d", route, r.status)
+			}
+		default:
+			if r.status == 403 || r.status == 401 {
+				t.Errorf("%s: a read-only token may look, got %d: %s", route, r.status, r.raw)
+			}
+		}
+		checked++
+	}
+	if checked < 15 {
+		t.Fatalf("only %d routes were checked", checked)
+	}
+}
+
+func TestATokenCanBeMadeToExpire(t *testing.T) {
+	h := newHarness(t, func(s *setup) { s.noWorker = true })
+	app := h.app("a")
+	now := time.Now()
+	h.api.now = func() time.Time { return now }
+
+	r := h.do("POST", "/v1/apps/"+app+"/tokens", map[string]any{"name": "short", "expires_in_hours": 2})
+	tok := str(r.body, "token")
+	if r.status != 201 || str(r.body, "expires_at") == "" || str(r.body, "scope") != "full" {
+		t.Fatalf("%d %s", r.status, r.raw)
+	}
+	if got := h.do("GET", "/v1/apps/"+app, nil, bearer(tok)...); got.status != 200 {
+		t.Fatalf("it works at first: %d", got.status)
+	}
+	now = now.Add(119 * time.Minute)
+	if got := h.do("GET", "/v1/apps/"+app, nil, bearer(tok)...); got.status != 200 {
+		t.Fatalf("and until the last minute: %d", got.status)
+	}
+	now = now.Add(2 * time.Minute)
+	if got := h.do("GET", "/v1/apps/"+app, nil, bearer(tok)...); got.status != 401 {
+		t.Fatalf("an expired token is refused like a wrong one: %d", got.status)
+	}
+	list := h.do("GET", "/v1/apps/"+app+"/tokens", nil)
+	if data, _ := list.body["data"].([]any); len(data) != 1 || data[0].(map[string]any)["expires_at"] == nil {
+		t.Fatalf("an expired token stays in the list: %s", list.raw)
+	}
+}
+
+func TestTokenScopeAndExpiryAreValidated(t *testing.T) {
+	h := newHarness(t, func(s *setup) { s.noWorker = true })
+	app := h.app("a")
+	for name, body := range map[string]map[string]any{
+		"unknown scope":    {"name": "x", "scope": "admin"},
+		"scope wrong case": {"name": "x", "scope": "READ"},
+		"zero hours":       {"name": "x", "expires_in_hours": 0},
+		"negative hours":   {"name": "x", "expires_in_hours": -5},
+		"over a year":      {"name": "x", "expires_in_hours": 24*365 + 1},
+		"hours as text":    {"name": "x", "expires_in_hours": "5"},
+	} {
+		if r := h.do("POST", "/v1/apps/"+app+"/tokens", body); r.status != 400 {
+			t.Errorf("%s: got %d", name, r.status)
+		}
+	}
+	if r := h.do("POST", "/v1/apps/"+app+"/tokens", map[string]any{"name": "ok", "scope": "read", "expires_in_hours": 24 * 365}); r.status != 201 {
+		t.Errorf("a year and read scope are fine: %d %s", r.status, r.raw)
+	}
+}
+
+func TestTheUseOfATokenIsRecordedRoughly(t *testing.T) {
+	h := newHarness(t, func(s *setup) { s.noWorker = true })
+	app := h.app("a")
+	now := time.Now().Truncate(time.Second)
+	h.api.now = func() time.Time { return now }
+	tok, id := h.token(app, "portal")
+	lastUsed := func() string {
+		list := h.do("GET", "/v1/apps/"+app+"/tokens", nil)
+		for _, d := range list.body["data"].([]any) {
+			if m := d.(map[string]any); str(m, "id") == id {
+				return str(m, "last_used_at")
+			}
+		}
+		return "?"
+	}
+	if got := lastUsed(); got != "" {
+		t.Fatalf("a token that was never used has no last use: %q", got)
+	}
+	h.do("GET", "/v1/apps/"+app, nil, bearer(tok)...)
+	first := lastUsed()
+	if first == "" {
+		t.Fatal("the first use is recorded")
+	}
+	now = now.Add(5 * time.Minute)
+	h.do("GET", "/v1/apps/"+app, nil, bearer(tok)...)
+	if got := lastUsed(); got != first {
+		t.Fatalf("within ten minutes it is not written again, so use does not become a write each time: %q then %q", first, got)
+	}
+	now = now.Add(6 * time.Minute)
+	h.do("GET", "/v1/apps/"+app, nil, bearer(tok)...)
+	if got := lastUsed(); got == first {
+		t.Fatal("after ten minutes it is updated")
+	}
+}
+
+func TestTheAuditLogSaysWhatKindOfTokenWasMade(t *testing.T) {
+	h := newHarness(t, func(s *setup) { s.noWorker = true })
+	app := h.app("a")
+	h.tokenWith(app, map[string]any{"name": "viewer", "scope": "read", "expires_in_hours": 5})
+	log := entries(t, h.do("GET", "/v1/apps/"+app+"/audit-log?action=token.create", nil))
+	if len(log) != 1 || fmt.Sprint(log[0]["detail"]) == "" || !strings.Contains(fmt.Sprint(log[0]["detail"]), "scope:read") || !strings.Contains(fmt.Sprint(log[0]["detail"]), "expires_at") {
+		t.Fatalf("%v", log)
+	}
+}

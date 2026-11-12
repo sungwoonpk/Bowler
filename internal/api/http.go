@@ -37,6 +37,7 @@ var (
 	errUnauthorized = newError(http.StatusUnauthorized, "unauthorized", "a valid API key is required")
 	errNotFound     = newError(http.StatusNotFound, "not_found", "no such resource")
 	errForbidden    = newError(http.StatusForbidden, "forbidden", "this credential may not do this")
+	errReadOnly     = newError(http.StatusForbidden, "read_only", "this token is read only")
 )
 
 func badRequest(message string) *apiError {
@@ -223,6 +224,11 @@ func (s *Server) authAs(adminOnly bool, next handler) handler {
 		if ok {
 			if adminOnly && !p.admin {
 				return errForbidden
+			}
+			// A read-only token may look and may not change anything. What it may read is narrowed again where a read
+			// would give away more than it shows, as the signing secret does.
+			if p.readOnly && r.Method != http.MethodGet && r.Method != http.MethodHead {
+				return errReadOnly
 			}
 			return next(w, withPrincipal(r, p))
 		}

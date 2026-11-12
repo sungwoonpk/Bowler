@@ -76,9 +76,15 @@ func (w lockedWriter) Write(b []byte) (int, error) {
 
 func start(t *testing.T, db, addr string, extra ...string) *process {
 	t.Helper()
+	return startWithEnv(t, db, addr, nil, extra...)
+}
+
+// startWithEnv is start with more environment variables, such as an encryption key.
+func startWithEnv(t *testing.T, db, addr string, env []string, extra ...string) *process {
+	t.Helper()
 	args := append([]string{"serve", "-addr", addr, "-db", db, "-allow-private", "-allow-http"}, extra...)
 	cmd := exec.Command(binary, args...)
-	cmd.Env = append(os.Environ(), "BOWLER_API_KEY="+procKey)
+	cmd.Env = append(append(os.Environ(), "BOWLER_API_KEY="+procKey), env...)
 	p := &process{cmd: cmd, addr: addr, exited: make(chan struct{})}
 	cmd.Stderr = lockedWriter{p}
 	if err := cmd.Start(); err != nil {

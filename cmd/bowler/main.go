@@ -22,6 +22,7 @@ import (
 	"github.com/sungwoonpk/bowler/internal/deliver"
 	"github.com/sungwoonpk/bowler/internal/dispatcher"
 	"github.com/sungwoonpk/bowler/internal/retention"
+	"github.com/sungwoonpk/bowler/internal/secretbox"
 	"github.com/sungwoonpk/bowler/internal/ssrf"
 	"github.com/sungwoonpk/bowler/internal/store"
 )
@@ -92,7 +93,22 @@ func serve(ctx context.Context, cfg config) error {
 		log.Warn("plain http endpoints are allowed, so webhook bodies may cross the network unencrypted")
 	}
 
-	db, err := store.Open(cfg.DB)
+	var box *secretbox.Box
+	if cfg.EncryptionKey != nil {
+		var previous [][]byte
+		if cfg.EncryptionKeyPrevious != nil {
+			previous = append(previous, cfg.EncryptionKeyPrevious)
+		}
+		var err error
+		if box, err = secretbox.New(cfg.EncryptionKey, previous...); err != nil {
+			return err
+		}
+	}
+	var opts []store.Option
+	if box != nil {
+		opts = append(opts, store.WithSecretBox(box))
+	}
+	db, err := store.Open(cfg.DB, opts...)
 	if err != nil {
 		return err
 	}
@@ -102,6 +118,29 @@ func serve(ctx context.Context, cfg config) error {
 			log.Error("closing the database failed", "error", err)
 		}
 	}()
+
+	// Seal what is still plain, or sealed under a key being rotated out. This also opens every secret, so a wrong key or a
+	// damaged value stops the program here and not later, when an endpoint is first used.
+	resealed, err := db.ResealSecrets(ctx, 200)
+	switch {
+	case errors.Is(err, secretbox.ErrNoKey):
+		return fmt.Errorf("this database holds encrypted signing secrets, so BOWLER_ENCRYPTION_KEY must be set to the key they were sealed with (%w)", err)
+	case errors.Is(err, secretbox.ErrUnknownKey):
+		return fmt.Errorf("a signing secret is sealed under a key that is not available. Set BOWLER_ENCRYPTION_KEY to the key it was sealed with, or while rotating, BOWLER_ENCRYPTION_KEY_PREVIOUS to the old one (%w)", err)
+	case err != nil:
+		return fmt.Errorf("signing secrets: %w", err)
+	}
+	if resealed > 0 {
+		log.Info("signing secrets were sealed under the current key", "endpoints", resealed)
+		// The old text stays in unused parts of the file and in the journal until it is rewritten.
+		if err := db.Compact(ctx); err != nil {
+			return fmt.Errorf("removing the old secrets from the file: %w", err)
+		}
+		log.Info("the database file was compacted so no plain secret stays in it")
+	}
+	if box == nil {
+		log.Warn("BOWLER_ENCRYPTION_KEY is not set, so signing secrets are stored unencrypted. Make a key with: openssl rand -base64 32")
+	}
 
 	sender := deliver.New(deliver.Config{SSRF: policy, Timeout: cfg.Timeout, UserAgent: "Bowler/" + version})
 	defer sender.Close()
