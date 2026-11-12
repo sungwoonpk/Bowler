@@ -102,8 +102,18 @@ func TestPurgeWorksInBatchesOldestFirst(t *testing.T) {
 		w.deliverAll(t, at, ResultSucceeded)
 	}
 	cutoff := t0.Add(-40 * 24 * time.Hour) // messages 0..19 are older than this
-	total := PurgeResult{}
-	calls := 0
+
+	// The first batch takes the eight oldest, so the oldest one left is the ninth.
+	if res, err := w.s.Purge(ctx(), cutoff, 8); err != nil || res.Messages != 8 {
+		t.Fatalf("%+v %v", res, err)
+	}
+	var oldest int64
+	w.s.db.QueryRow("SELECT MIN(created_at) FROM messages").Scan(&oldest)
+	if want := ms(t0.Add(-time.Duration(60-8) * 24 * time.Hour)); oldest != want {
+		t.Fatalf("a batch must remove the oldest first: oldest left is %d, want %d", oldest, want)
+	}
+	total := PurgeResult{Messages: 8, Deliveries: 8, Attempts: 8}
+	calls := 1
 	for {
 		res, err := w.s.Purge(ctx(), cutoff, 8)
 		if err != nil {
