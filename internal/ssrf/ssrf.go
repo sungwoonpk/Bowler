@@ -163,9 +163,7 @@ func (p Policy) blocks(ip netip.Addr) bool {
 	if !IsBlocked(ip) {
 		return false
 	}
-	if !ip.IsValid() {
-		return true
-	}
+	// An invalid address is blocked above and is in no prefix, so it stays blocked here.
 	for _, c := range p.AllowCIDRs {
 		if c.Contains(ip) {
 			return false
