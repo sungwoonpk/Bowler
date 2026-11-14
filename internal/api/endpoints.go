@@ -74,11 +74,10 @@ func (s *Server) createEndpoint(w http.ResponseWriter, r *http.Request) error {
 	}
 	ep, err := s.store.CreateEndpoint(r.Context(), store.NewEndpoint{
 		AppID: app.ID, URL: in.URL, Description: desc, EventTypes: types, Concurrency: in.Concurrency, RatePerSecond: in.RateLimit, Secret: secret,
-	}, s.now())
+	}, s.now(), store.Audited(s.auditEntry(w, r, app.ID, "endpoint.create", "endpoint", "", map[string]any{"url": in.URL})))
 	if err != nil {
 		return err
 	}
-	s.audit(w, r, app.ID, "endpoint.create", "endpoint", ep.ID, map[string]any{"url": ep.URL})
 	writeJSON(w, http.StatusCreated, endpointWithSecret{Endpoint: ep, Secret: secret})
 	return nil
 }
@@ -196,14 +195,14 @@ func (s *Server) updateEndpoint(w http.ResponseWriter, r *http.Request) error {
 		up.RatePerSecond = in.RateLimit
 	}
 	up.Disabled = in.Disabled
-	updated, err := s.store.UpdateEndpoint(r.Context(), app.ID, ep.ID, up, s.now())
+	updated, err := s.store.UpdateEndpoint(r.Context(), app.ID, ep.ID, up, s.now(),
+		store.Audited(s.auditEntry(w, r, app.ID, "endpoint.update", "endpoint", ep.ID, map[string]any{"fields": changed})))
 	if err != nil {
 		return err
 	}
 	if in.Disabled != nil && !*in.Disabled {
 		s.notify() // switching an endpoint back on makes its waiting deliveries ready
 	}
-	s.audit(w, r, app.ID, "endpoint.update", "endpoint", ep.ID, map[string]any{"fields": changed})
 	writeJSON(w, http.StatusOK, updated)
 	return nil
 }
@@ -217,10 +216,10 @@ func (s *Server) deleteEndpoint(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
-	if err := s.store.DeleteEndpoint(r.Context(), app.ID, ep.ID, s.now()); err != nil {
+	if err := s.store.DeleteEndpoint(r.Context(), app.ID, ep.ID, s.now(),
+		store.Audited(s.auditEntry(w, r, app.ID, "endpoint.delete", "endpoint", ep.ID, nil))); err != nil {
 		return err
 	}
-	s.audit(w, r, app.ID, "endpoint.delete", "endpoint", ep.ID, nil)
 	w.WriteHeader(http.StatusNoContent)
 	return nil
 }
@@ -239,8 +238,11 @@ func (s *Server) getSecret(w http.ResponseWriter, r *http.Request) error {
 	if callerOf(r).readOnly {
 		return errReadOnly
 	}
-	// Reading a secret is worth a record: whoever holds it can forge webhooks to this endpoint.
-	s.audit(w, r, app.ID, "endpoint.secret_read", "endpoint", ep.ID, nil)
+	// Reading a secret is worth a record: whoever holds it can forge webhooks to this endpoint. The entry is written first,
+	// and if that fails the secret is not given out.
+	if err := s.auditBefore(w, r, s.auditEntry(w, r, app.ID, "endpoint.secret_read", "endpoint", ep.ID, nil)); err != nil {
+		return err
+	}
 	writeJSON(w, http.StatusOK, map[string]string{"secret": ep.Secret})
 	return nil
 }
@@ -276,12 +278,13 @@ func (s *Server) rotateSecret(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
-	until := s.now().Add(time.Duration(grace) * time.Hour)
-	updated, err := s.store.RotateSecret(r.Context(), app.ID, ep.ID, secret, until)
+	now := s.now()
+	until := now.Add(time.Duration(grace) * time.Hour)
+	updated, err := s.store.RotateSecret(r.Context(), app.ID, ep.ID, secret, until, now,
+		store.Audited(s.auditEntry(w, r, app.ID, "endpoint.secret_rotate", "endpoint", ep.ID, map[string]any{"grace_hours": grace})))
 	if err != nil {
 		return err
 	}
-	s.audit(w, r, app.ID, "endpoint.secret_rotate", "endpoint", ep.ID, map[string]any{"grace_hours": grace})
 	out := map[string]any{"secret": secret}
 	if grace > 0 {
 		out["previous_secret_valid_until"] = updated.PrevSecretExpiresAt
@@ -310,14 +313,15 @@ func (s *Server) recoverEndpoint(w http.ResponseWriter, r *http.Request) error {
 	if in.Since != nil {
 		since = *in.Since
 	}
-	n, err := s.store.RecoverEndpoint(r.Context(), app.ID, ep.ID, since, now)
+	// The store adds how many deliveries were replayed to the entry's detail.
+	n, err := s.store.RecoverEndpoint(r.Context(), app.ID, ep.ID, since, now,
+		store.Audited(s.auditEntry(w, r, app.ID, "endpoint.recover", "endpoint", ep.ID, nil)))
 	if err != nil {
 		return err
 	}
 	if n > 0 {
 		s.notify()
 	}
-	s.audit(w, r, app.ID, "endpoint.recover", "endpoint", ep.ID, map[string]any{"replayed": n})
 	writeJSON(w, http.StatusOK, map[string]any{"replayed": n, "since": since.UTC()})
 	return nil
 }

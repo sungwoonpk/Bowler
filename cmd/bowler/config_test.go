@@ -176,3 +176,36 @@ func TestEncryptionKeysComeFromTheEnvironmentOnly(t *testing.T) {
 		t.Error("a previous key without a current one makes no sense")
 	}
 }
+
+func TestAllowedRangesComeFromFlagsOrTheEnvironment(t *testing.T) {
+	base := map[string]string{"BOWLER_API_KEY": goodKey}
+	c, err := parse(t, nil, base)
+	if err != nil || len(c.AllowCIDRs) != 0 {
+		t.Fatalf("no range is allowed by default: %+v %v", c.AllowCIDRs, err)
+	}
+	c, err = parse(t, []string{"-allow-cidr", "10.20.0.0/16", "-allow-cidr", "192.168.5.0/24,172.16.4.0/24"}, base)
+	if err != nil || len(c.AllowCIDRs) != 3 {
+		t.Fatalf("a flag can be repeated and can hold a list: %v %v", c.AllowCIDRs, err)
+	}
+	env := map[string]string{"BOWLER_API_KEY": goodKey, "BOWLER_ALLOW_CIDRS": "10.1.0.0/16, 10.2.0.0/16"}
+	c, err = parse(t, nil, env)
+	if err != nil || len(c.AllowCIDRs) != 2 || c.AllowCIDRs[1].String() != "10.2.0.0/16" {
+		t.Fatalf("the environment applies, and spaces around a range do not matter: %v %v", c.AllowCIDRs, err)
+	}
+	c, err = parse(t, []string{"-allow-cidr", "10.9.0.0/16"}, env)
+	if err != nil || len(c.AllowCIDRs) != 1 || c.AllowCIDRs[0].String() != "10.9.0.0/16" {
+		t.Fatalf("a flag replaces the environment as a whole: %v %v", c.AllowCIDRs, err)
+	}
+}
+
+func TestADangerousAllowedRangeStopsTheServiceFromStarting(t *testing.T) {
+	for _, bad := range []string{"0.0.0.0/0", "8.8.8.0/24", "169.254.0.0/16", "10.20.0.5/16", "garbage", "", "10.20.0.0/16,8.8.8.0/24"} {
+		_, err := parse(t, []string{"-allow-cidr", bad}, map[string]string{"BOWLER_API_KEY": goodKey})
+		if err == nil || !strings.Contains(err.Error(), "--allow-cidr") {
+			t.Errorf("%q must be refused with a message that names the setting, got %v", bad, err)
+		}
+	}
+	if _, err := parse(t, nil, map[string]string{"BOWLER_API_KEY": goodKey, "BOWLER_ALLOW_CIDRS": "8.8.8.0/24"}); err == nil {
+		t.Error("the environment variable is checked the same way")
+	}
+}

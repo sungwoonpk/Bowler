@@ -31,13 +31,18 @@ func scanApp(r scanner) (domain.App, error) {
 }
 
 // CreateApp adds an app. uid is the caller's own identifier for it and must be unique when given.
-func (s *Store) CreateApp(ctx context.Context, name string, uid *string, now time.Time) (domain.App, error) {
+func (s *Store) CreateApp(ctx context.Context, name string, uid *string, now time.Time, opts ...WriteOption) (domain.App, error) {
 	a := domain.App{ID: id.New(id.App), Name: name, UID: uid, CreatedAt: now.UTC().Truncate(time.Millisecond)}
 	var u sql.NullString
 	if uid != nil {
 		u = sql.NullString{String: *uid, Valid: true}
 	}
-	_, err := s.db.ExecContext(ctx, "INSERT INTO apps (id, name, uid, created_at) VALUES (?, ?, ?, ?)", a.ID, a.Name, u, ms(a.CreatedAt))
+	err := s.withTx(ctx, func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx, "INSERT INTO apps (id, name, uid, created_at) VALUES (?, ?, ?, ?)", a.ID, a.Name, u, ms(a.CreatedAt)); err != nil {
+			return err
+		}
+		return optsOf(opts).record(ctx, tx, now, about(a.ID, a.ID, nil))
+	})
 	if isUniqueViolation(err) {
 		return domain.App{}, ErrConflict
 	}

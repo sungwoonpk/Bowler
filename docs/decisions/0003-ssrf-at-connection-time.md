@@ -30,8 +30,8 @@ do exactly that, and can also answer differently on each lookup.
 
 ## Costs
 
-- Receivers that really are on a private network (an internal system) cannot be reached unless the flag is turned on, and
-  the flag is global. A per-endpoint allow list would be better for that case.
+- Receivers that really are on a private network (an internal system) could at first be reached only with the global flag.
+  [0012](0012-operator-allow-list-for-private-receivers.md) lets the operator allow named private ranges instead.
 - A host name that resolves to both a public and a private address is refused on the attempt that picks the private one,
   which makes the failure intermittent.
 - IP ranges are a list in the code. A new reserved range has to be added by hand.

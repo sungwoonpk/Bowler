@@ -64,10 +64,10 @@ func (s *Server) authenticate(r *http.Request) (p principal, ok bool, err error)
 	return principal{}, false, nil
 }
 
-// audit records something a caller did. It is called after the action succeeded and never fails the request: the action
-// has happened, and an error here is counted and logged so that a gap in the record is noticed. detail must never hold a
-// secret, a token or a payload.
-func (s *Server) audit(w http.ResponseWriter, r *http.Request, appID, action, resourceKind, resourceID string, detail map[string]any) {
+// auditEntry describes something a caller is doing, for the store to write in the same transaction as the change, so
+// that either both happen or neither does. A resource id left empty is filled in by the store when the change creates
+// it. detail must never hold a secret, a token or a payload.
+func (s *Server) auditEntry(w http.ResponseWriter, r *http.Request, appID, action, resourceKind, resourceID string, detail map[string]any) domain.AuditEntry {
 	kind, actor := callerOf(r).actor()
 	e := domain.AuditEntry{
 		ActorKind: kind, ActorID: actor, AppID: appID, Action: action,
@@ -78,10 +78,14 @@ func (s *Server) audit(w http.ResponseWriter, r *http.Request, appID, action, re
 			e.Detail = b
 		}
 	}
-	if _, err := s.recordAudit(r.Context(), e, s.now()); err != nil {
-		s.auditErrors.Add(1)
-		s.log.Error("recording an audit entry failed", "action", action, "error", err, "request_id", e.RequestID)
-	}
+	return e
+}
+
+// auditBefore records something that changes nothing, before it is done: reading a secret. If the entry cannot be
+// written the caller is refused, since a read nobody can see is the case an audit log exists to prevent.
+func (s *Server) auditBefore(w http.ResponseWriter, r *http.Request, e domain.AuditEntry) error {
+	_, err := s.store.RecordAudit(r.Context(), e, s.now())
+	return err
 }
 
 // lastUsedEvery is how often the use of a token is written down. Writing on every request would turn each one into a

@@ -592,7 +592,7 @@ func TestEndpointUpdateAndSecretRotation(t *testing.T) {
 	}
 
 	until := t0.Add(24 * time.Hour)
-	rotated, err := w.s.RotateSecret(ctx(), w.app.ID, e.ID, "whsec_bmV3", until)
+	rotated, err := w.s.RotateSecret(ctx(), w.app.ID, e.ID, "whsec_bmV3", until, t0)
 	if err != nil || rotated.Secret != "whsec_bmV3" || rotated.PrevSecret != "whsec_c2VjcmV0" {
 		t.Fatalf("rotate: %+v %v", rotated, err)
 	}

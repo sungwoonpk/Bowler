@@ -74,11 +74,12 @@ func (r *receiver) set(status, fails int) {
 func (r *receiver) last() received { r.mu.Lock(); defer r.mu.Unlock(); return r.hits[len(r.hits)-1] }
 
 type harness struct {
-	t    *testing.T
-	api  *Server
-	srv  *httptest.Server
-	st   *store.Store
-	disp *dispatcher.Dispatcher
+	t      *testing.T
+	api    *Server
+	srv    *httptest.Server
+	st     *store.Store
+	disp   *dispatcher.Dispatcher
+	dbPath string
 }
 
 type setup struct {
@@ -94,13 +95,14 @@ func newHarness(t *testing.T, opts ...func(*setup)) *harness {
 	for _, o := range opts {
 		o(&cfg)
 	}
-	st, err := store.Open(filepath.Join(t.TempDir(), "bowler.db"))
+	dbPath := filepath.Join(t.TempDir(), "bowler.db")
+	st, err := store.Open(dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { st.Close() })
 
-	h := &harness{t: t, st: st}
+	h := &harness{t: t, st: st, dbPath: dbPath}
 	disp, err := dispatcher.New(st, deliver.New(deliver.Config{SSRF: cfg.policy, Timeout: time.Second}), dispatcher.Config{
 		Retry: quick, PollInterval: 10 * time.Millisecond, AttemptTimeout: time.Second, LeaseFor: 6 * time.Second, DrainTimeout: time.Second,
 	})

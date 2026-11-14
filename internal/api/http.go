@@ -95,6 +95,11 @@ func (s *Server) wrap(h handler) http.HandlerFunc {
 			ae = newError(http.StatusConflict, "too_many_tokens", "this app already has the most tokens it may hold")
 		case errors.Is(err, store.ErrBadState):
 			ae = newError(http.StatusConflict, "bad_state", "this is not allowed in the delivery's current state")
+		case errors.Is(err, store.ErrAuditWrite):
+			// The change was not made. Counting it is how an operator finds out that the audit log has stopped working.
+			s.auditErrors.Add(1)
+			s.log.Error("a request was refused because its audit entry could not be written", "path", r.URL.Path, "error", err, "request_id", w.Header().Get("X-Request-ID"))
+			ae = newError(http.StatusInternalServerError, "internal", "the change was not made, because it could not be recorded in the audit log")
 		default:
 			// The details can contain table names and file paths, so they go to the log and not to the caller.
 			s.log.Error("request failed", "path", r.URL.Path, "error", err, "request_id", w.Header().Get("X-Request-ID"))

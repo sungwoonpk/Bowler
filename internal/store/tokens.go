@@ -48,7 +48,7 @@ type NewAppToken struct {
 }
 
 // CreateAppToken stores the hash of a new token for an app. The token itself is never stored.
-func (s *Store) CreateAppToken(ctx context.Context, n NewAppToken, now time.Time) (domain.AppToken, error) {
+func (s *Store) CreateAppToken(ctx context.Context, n NewAppToken, now time.Time, opts ...WriteOption) (domain.AppToken, error) {
 	if n.Scope == "" {
 		n.Scope = domain.ScopeFull
 	}
@@ -72,7 +72,10 @@ func (s *Store) CreateAppToken(ctx context.Context, n NewAppToken, now time.Time
 		_, err := tx.ExecContext(ctx,
 			"INSERT INTO app_tokens (id, app_id, name, token_hash, token_prefix, scope, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
 			t.ID, t.AppID, t.Name, n.Hash, t.Prefix, t.Scope, ms(t.CreatedAt), nullMS(t.ExpiresAt))
-		return err
+		if err != nil {
+			return err
+		}
+		return optsOf(opts).record(ctx, tx, now, about(t.AppID, t.ID, nil))
 	})
 	return t, err
 }
@@ -137,7 +140,7 @@ func (s *Store) ListAppTokens(ctx context.Context, appID string, p Page) ([]doma
 
 // RevokeAppToken stops a token from working. Revoking one that is already revoked changes nothing and keeps the
 // original time.
-func (s *Store) RevokeAppToken(ctx context.Context, appID, tokenID string, now time.Time) (domain.AppToken, error) {
+func (s *Store) RevokeAppToken(ctx context.Context, appID, tokenID string, now time.Time, opts ...WriteOption) (domain.AppToken, error) {
 	var out domain.AppToken
 	err := s.withTx(ctx, func(tx *sql.Tx) error {
 		t, err := scanToken(tx.QueryRowContext(ctx, "SELECT "+tokenColumns+" FROM app_tokens WHERE id = ? AND app_id = ?", tokenID, appID))
@@ -153,6 +156,10 @@ func (s *Store) RevokeAppToken(ctx context.Context, appID, tokenID string, now t
 				return err
 			}
 			t.RevokedAt = &at
+			// Only the call that did the revoking is recorded, so two calls at once leave one entry.
+			if err := optsOf(opts).record(ctx, tx, now, about(appID, tokenID, nil)); err != nil {
+				return err
+			}
 		}
 		out = t
 		return nil

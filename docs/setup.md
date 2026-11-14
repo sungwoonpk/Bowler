@@ -18,6 +18,8 @@ docker compose up --build
 
 To send to a server on your own machine, start it with `--allow-private --allow-http`. Those flags are for development only. They switch off the protection against calling private addresses, so do not use them in production.
 
+To send to receivers on your own network in production, name the range and leave the protection on for everything else: `--allow-cidr 10.20.0.0/16`. See [Private receivers](#private-receivers).
+
 ## Configuration
 
 Every setting is a flag and an environment variable, except the three keys, which are environment only so that they do not show in the process list. A flag beats the variable, which beats the default.
@@ -38,8 +40,27 @@ Every setting is a flag and an environment variable, except the three keys, whic
 | `--audit-retention` | `BOWLER_AUDIT_RETENTION` | `8760h` (365 days) | How long the audit log is kept. `0` for ever, otherwise at least `168h`                       |
 | `--log-format`      | `BOWLER_LOG_FORMAT`      | `json`             | `json` or `text`                                                                              |
 | `--log-level`       | `BOWLER_LOG_LEVEL`       | `info`             | `debug`, `info`, `warn` or `error`                                                            |
+| `--allow-cidr`      | `BOWLER_ALLOW_CIDRS`     | none               | A private range endpoints may use, such as `10.20.0.0/16`. Repeat it or separate with commas  |
 | `--allow-private`   | `BOWLER_ALLOW_PRIVATE`   | off                | Development only. Allows private and loopback addresses for every endpoint                    |
 | `--allow-http`      | `BOWLER_ALLOW_HTTP`      | off                | Development only. Allows plain `http`                                                         |
+
+## Private receivers
+
+A receiver on your own network, say `10.20.1.7`, is refused by default, like every private address. Name its range:
+
+```bash
+bowler serve --allow-cidr 10.20.0.0/16 --allow-cidr 192.168.5.0/24
+# or: BOWLER_ALLOW_CIDRS=10.20.0.0/16,192.168.5.0/24
+```
+
+Every other private address stays blocked, and the start-up log lists the open ranges. Things to know:
+
+- **It applies to every customer.** Any app that can register an endpoint can point it into an allowed range, so allow only a range where that is acceptable.
+- **Bowler refuses to start** if a range reaches public addresses, includes a cloud metadata address such as `169.254.169.254`, is not written as a network (`10.20.0.5/16`), or lies outside the private ranges. The message says which.
+- **Write the address, not `localhost`.** A URL that names `localhost` is refused at registration even when `127.0.0.0/8` is allowed.
+- **A change needs a restart.**
+
+The reasoning is in [decision 0012](decisions/0012-operator-allow-list-for-private-receivers.md).
 
 ## Encrypting the signing secrets
 

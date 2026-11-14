@@ -33,7 +33,9 @@ Read the "What is not covered" section before running it anywhere real. The shor
 - Run Bowler behind a reverse proxy that terminates TLS, and listen on loopback or a private network. The default address is
   `127.0.0.1:8080`.
 - Do **not** use `--allow-private` or `--allow-http` in production. The first removes the protection that stops users from making
-  Bowler call your internal network.
+  Bowler call your internal network. If receivers really are on your network, allow just their range with `--allow-cidr`. Every
+  customer can then reach that range, so keep it to ranges where that is acceptable, and never one that holds anything customers
+  must not reach.
 - Prefer running the delivery workers where they cannot reach anything private at all. The built-in check is a second line of
   defense, not the first.
 - Back up the database file. There is no replication.

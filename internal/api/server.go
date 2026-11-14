@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/sungwoonpk/bowler/internal/dispatcher"
-	"github.com/sungwoonpk/bowler/internal/domain"
 	"github.com/sungwoonpk/bowler/internal/retention"
 	"github.com/sungwoonpk/bowler/internal/ssrf"
 	"github.com/sungwoonpk/bowler/internal/store"
@@ -48,12 +47,10 @@ type Server struct {
 	notify    func()
 	stats     func() dispatcher.Stats
 	retention func() retention.Stats
-	// auditErrors counts audit entries that could not be recorded.
+	// auditErrors counts changes that were refused because their audit entry could not be written.
 	auditErrors atomic.Uint64
 	// lastTouched remembers, for each token, when its use was last written down.
 	lastTouched sync.Map
-	// recordAudit writes one audit entry. It is the store's, and a test replaces it to see what a failure does.
-	recordAudit func(context.Context, domain.AuditEntry, time.Time) (domain.AuditEntry, error)
 	maxPayload  int
 	version     string
 	now         func() time.Time
@@ -88,7 +85,6 @@ func New(cfg Config) (*Server, error) {
 	if s.notify == nil {
 		s.notify = func() {}
 	}
-	s.recordAudit = cfg.Store.RecordAudit
 	s.routes()
 	return s, nil
 }

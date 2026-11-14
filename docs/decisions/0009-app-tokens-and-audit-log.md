@@ -51,9 +51,9 @@ every customer's data. Separately, with one key there was no record of who chang
 - **The service records roughly when a token was last used**, to within ten minutes. It is written at most that often per token,
   so that using a token does not turn each request into a database write. It is for finding tokens nobody uses, and it is not
   an exact record. The audit log is the exact one for what a token did.
-- **The audit entry is written after the action, not in the same transaction.** If the write fails, the action has happened and
-  the entry is missing. The caller is told the action worked, the failure is logged, and `bowler_audit_errors_total` counts
-  it, so a gap is noticed and not hidden. Making them one transaction would mean passing the entry into every store method.
+- **The audit entry was first written after the action, not in the same transaction.** If the write failed, the action had
+  happened and the entry was missing. This was changed in [0011](0011-audit-entry-in-the-same-transaction.md): the entry is now
+  part of the change's transaction, and a failed entry refuses the request.
 - **The log records successes, not refusals.** A wrong key is in the request log, and a request that fails is not an action.
 - **The operator's key is still all-powerful and appears in the log only as `admin`.** If two people share the key, the log
   cannot tell them apart. That needs named operator credentials, which are not built.
@@ -65,6 +65,6 @@ every customer's data. Separately, with one key there was no record of who chang
   which brings the lookup back with more moving parts.
 - **A key per app that is also an API key, kept in the environment.** Fixed at start, impossible to rotate while running, and
   it does not scale to many apps.
-- **One audit transaction with the change.** More correct, and a much larger change to the store. Chosen against for now,
-  with the gap visible as above.
+- **One audit transaction with the change.** More correct, and a larger change to the store. Chosen against at first, and done
+  later in [0011](0011-audit-entry-in-the-same-transaction.md).
 - **Logging every request.** The request log already does that, without a record of what it meant.

@@ -6,6 +6,7 @@ import (
 
 	"github.com/sungwoonpk/bowler/internal/domain"
 	"github.com/sungwoonpk/bowler/internal/id"
+	"github.com/sungwoonpk/bowler/internal/store"
 )
 
 // Apps: the customers of the company that runs Bowler.
@@ -28,11 +29,10 @@ func (s *Server) createApp(w http.ResponseWriter, r *http.Request) error {
 			return badRequest("uid may use letters, digits and . _ : @ -, be at most 100 characters and not start with app_")
 		}
 	}
-	app, err := s.store.CreateApp(r.Context(), name, in.UID, s.now())
+	app, err := s.store.CreateApp(r.Context(), name, in.UID, s.now(), store.Audited(s.auditEntry(w, r, "", "app.create", "app", "", nil)))
 	if err != nil {
 		return err
 	}
-	s.audit(w, r, app.ID, "app.create", "app", app.ID, nil)
 	writeJSON(w, http.StatusCreated, app)
 	return nil
 }

@@ -149,7 +149,7 @@ func (s *Store) ListAttempts(ctx context.Context, appID, deliveryID string) ([]d
 
 // Replay sends a finished delivery again, as if for the first time: it gets a fresh set of attempts. A delivery
 // that is still waiting or being tried cannot be replayed, because it is already on its way.
-func (s *Store) Replay(ctx context.Context, appID, deliveryID string, now time.Time) (domain.Delivery, error) {
+func (s *Store) Replay(ctx context.Context, appID, deliveryID string, now time.Time, opts ...WriteOption) (domain.Delivery, error) {
 	var out domain.Delivery
 	err := s.withTx(ctx, func(tx *sql.Tx) error {
 		d, err := scanDelivery(tx.QueryRowContext(ctx,
@@ -171,7 +171,7 @@ func (s *Store) Replay(ctx context.Context, appID, deliveryID string, now time.T
 		}
 		d.State, d.AttemptCount, d.NextAttemptAt, d.FinishedAt = domain.Pending, 0, now.UTC().Truncate(time.Millisecond), nil
 		out = d
-		return nil
+		return optsOf(opts).record(ctx, tx, now, about(appID, deliveryID, nil))
 	})
 	return out, err
 }
@@ -187,7 +187,7 @@ func (s *Store) Replay(ctx context.Context, appID, deliveryID string, now time.T
 // Messages from before the endpoint existed, and messages whose type the endpoint does not subscribe to, are left
 // out. A message that already has a delivery is never given a second one. It returns how many deliveries were
 // replayed or created.
-func (s *Store) RecoverEndpoint(ctx context.Context, appID, endpointID string, since, now time.Time) (int, error) {
+func (s *Store) RecoverEndpoint(ctx context.Context, appID, endpointID string, since, now time.Time, opts ...WriteOption) (int, error) {
 	now = now.UTC().Truncate(time.Millisecond)
 	var replayed int
 	err := s.withTx(ctx, func(tx *sql.Tx) error {
@@ -249,7 +249,7 @@ func (s *Store) RecoverEndpoint(ctx context.Context, appID, endpointID string, s
 		}
 		n, _ := res.RowsAffected()
 		replayed += int(n)
-		return nil
+		return optsOf(opts).record(ctx, tx, now, about(appID, endpointID, func(e *domain.AuditEntry) { e.Detail = withCount(e.Detail, "replayed", replayed) }))
 	})
 	return replayed, err
 }

@@ -53,7 +53,7 @@ func (s *Server) replayDelivery(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
-	d, err := s.store.Replay(r.Context(), app.ID, dID, s.now())
+	d, err := s.store.Replay(r.Context(), app.ID, dID, s.now(), store.Audited(s.auditEntry(w, r, app.ID, "delivery.replay", "delivery", dID, nil)))
 	if errors.Is(err, store.ErrBadState) {
 		return newError(http.StatusConflict, "bad_state", "only a finished delivery can be replayed, this one is still "+string(d.State))
 	}
@@ -61,7 +61,6 @@ func (s *Server) replayDelivery(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 	s.notify()
-	s.audit(w, r, app.ID, "delivery.replay", "delivery", d.ID, nil)
 	writeJSON(w, http.StatusAccepted, d)
 	return nil
 }
