@@ -7,12 +7,14 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"net/netip"
 	"os"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/sungwoonpk/bowler/internal/secretbox"
+	"github.com/sungwoonpk/bowler/internal/ssrf"
 )
 
 // config is everything `bowler serve` needs, gathered from flags and the environment.
@@ -25,12 +27,14 @@ type config struct {
 	EncryptionKey         []byte
 	EncryptionKeyPrevious []byte
 	AllowPrivate          bool
-	AllowHTTP             bool
-	Workers               int
-	Timeout               time.Duration
-	Lease                 time.Duration
-	Drain                 time.Duration
-	MaxPayload            int
+	// AllowCIDRs are private ranges that may be called without turning on AllowPrivate.
+	AllowCIDRs []netip.Prefix
+	AllowHTTP  bool
+	Workers    int
+	Timeout    time.Duration
+	Lease      time.Duration
+	Drain      time.Duration
+	MaxPayload int
 	// Retention is how long finished data is kept. Zero keeps it for ever.
 	Retention time.Duration
 	// AuditRetention is how long the audit log is kept. Zero keeps it for ever.
@@ -75,6 +79,13 @@ func parseServe(args []string, getenv func(string) string, stderr io.Writer) (co
 	fs.StringVar(&c.Addr, "addr", envStr("BOWLER_ADDR", "127.0.0.1:8080"), "address to listen on (BOWLER_ADDR)")
 	fs.StringVar(&c.DB, "db", envStr("BOWLER_DB", "bowler.db"), "path of the SQLite database (BOWLER_DB)")
 	fs.BoolVar(&c.AllowPrivate, "allow-private", envBool("BOWLER_ALLOW_PRIVATE"), "allow endpoints on private and loopback addresses. For development only (BOWLER_ALLOW_PRIVATE)")
+	// The flag can be given more than once, and each value can hold several ranges separated by commas. A flag replaces the
+	// environment variable as a whole, as every other setting does.
+	var cidrFlags []string
+	fs.Func("allow-cidr", "a private range endpoints may use, such as 10.20.0.0/16. Repeat it or separate with commas (BOWLER_ALLOW_CIDRS)", func(v string) error {
+		cidrFlags = append(cidrFlags, v)
+		return nil
+	})
 	fs.BoolVar(&c.AllowHTTP, "allow-http", envBool("BOWLER_ALLOW_HTTP"), "allow endpoints that use plain http (BOWLER_ALLOW_HTTP)")
 	fs.IntVar(&c.Workers, "workers", envInt("BOWLER_WORKERS", 128), "most deliveries in progress at once (BOWLER_WORKERS)")
 	fs.DurationVar(&c.Timeout, "timeout", envDur("BOWLER_TIMEOUT", 15*time.Second), "how long one delivery attempt may take (BOWLER_TIMEOUT)")
@@ -110,6 +121,21 @@ func parseServe(args []string, getenv func(string) string, stderr io.Writer) (co
 			return c, fmt.Errorf("BOWLER_ENCRYPTION_KEY_PREVIOUS: %w", err)
 		}
 		c.EncryptionKeyPrevious = k
+	}
+	cidrs := cidrFlags
+	if len(cidrs) == 0 && getenv("BOWLER_ALLOW_CIDRS") != "" {
+		cidrs = []string{getenv("BOWLER_ALLOW_CIDRS")}
+	}
+	var ranges []string
+	for _, v := range cidrs {
+		ranges = append(ranges, strings.Split(v, ",")...)
+	}
+	if len(ranges) > 0 {
+		list, err := ssrf.ParseAllowList(ranges)
+		if err != nil {
+			return c, fmt.Errorf("--allow-cidr: %w", err)
+		}
+		c.AllowCIDRs = list
 	}
 	if _, _, err := net.SplitHostPort(c.Addr); err != nil {
 		return c, fmt.Errorf("--addr %q is not a host:port address", c.Addr)

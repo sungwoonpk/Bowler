@@ -85,9 +85,18 @@ Run "bowler serve -h" for the settings.
 // progress finish, and only then close the database.
 func serve(ctx context.Context, cfg config) error {
 	log := newLogger(cfg, os.Stderr)
-	policy := ssrf.Policy{AllowPrivate: cfg.AllowPrivate, AllowHTTP: cfg.AllowHTTP}
+	policy := ssrf.Policy{AllowPrivate: cfg.AllowPrivate, AllowHTTP: cfg.AllowHTTP, AllowCIDRs: cfg.AllowCIDRs}
 	if cfg.AllowPrivate {
 		log.Warn("private and loopback addresses are allowed. This is for development, never for a service that takes URLs from strangers")
+		if len(cfg.AllowCIDRs) > 0 {
+			log.Warn("--allow-cidr has no effect while --allow-private is on, which allows every private address")
+		}
+	} else if len(cfg.AllowCIDRs) > 0 {
+		ranges := make([]string, len(cfg.AllowCIDRs))
+		for i, p := range cfg.AllowCIDRs {
+			ranges[i] = p.String()
+		}
+		log.Info("endpoints may use these private ranges, and no other", "ranges", ranges)
 	}
 	if cfg.AllowHTTP {
 		log.Warn("plain http endpoints are allowed, so webhook bodies may cross the network unencrypted")

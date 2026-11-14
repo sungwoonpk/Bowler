@@ -82,7 +82,18 @@ func start(t *testing.T, db, addr string, extra ...string) *process {
 // startWithEnv is start with more environment variables, such as an encryption key.
 func startWithEnv(t *testing.T, db, addr string, env []string, extra ...string) *process {
 	t.Helper()
-	args := append([]string{"serve", "-addr", addr, "-db", db, "-allow-private", "-allow-http"}, extra...)
+	return launch(t, addr, env, append([]string{"serve", "-addr", addr, "-db", db, "-allow-private", "-allow-http"}, extra...))
+}
+
+// startStrict starts the program without the development flag that allows every private address, so a test can see what
+// the SSRF protection does. It still allows plain http, because the test receivers speak it.
+func startStrict(t *testing.T, db, addr string, extra ...string) *process {
+	t.Helper()
+	return launch(t, addr, nil, append([]string{"serve", "-addr", addr, "-db", db, "-allow-http"}, extra...))
+}
+
+func launch(t *testing.T, addr string, env, args []string) *process {
+	t.Helper()
 	cmd := exec.Command(binary, args...)
 	cmd.Env = append(append(os.Environ(), "BOWLER_API_KEY="+procKey), env...)
 	p := &process{cmd: cmd, addr: addr, exited: make(chan struct{})}
@@ -379,5 +390,61 @@ func TestHealthcheckUsesTheEnvironmentAddress(t *testing.T) {
 	cmd.Env = append(os.Environ(), "BOWLER_ADDR="+addr)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("%v %s", err, out)
+	}
+}
+
+// The operator can open one private range without opening them all.
+func TestAnAllowedRangeReachesAPrivateReceiverWithoutTheDevelopmentFlag(t *testing.T) {
+	cust := newCustomer(t) // listens on 127.0.0.1
+
+	register := func(p *process) (int, map[string]any, map[string]any) {
+		_, app := p.call(t, "POST", "/v1/apps", map[string]any{"name": "acme"})
+		code, ep := p.call(t, "POST", "/v1/apps/"+s(app, "id")+"/endpoints", map[string]any{"url": cust.srv.URL})
+		return code, app, ep
+	}
+
+	// Without the list the receiver is refused when it is registered.
+	closed := startStrict(t, filepath.Join(t.TempDir(), "a.db"), freeAddr(t))
+	if code, _, ep := register(closed); code != 400 {
+		t.Fatalf("loopback must be refused by default: %d %v", code, ep)
+	}
+	// A list that names another range changes nothing for this one.
+	other := startStrict(t, filepath.Join(t.TempDir(), "b.db"), freeAddr(t), "-allow-cidr", "10.20.0.0/16")
+	if code, _, ep := register(other); code != 400 {
+		t.Fatalf("another range must not open loopback: %d %v", code, ep)
+	}
+	if logs := other.logs(); !strings.Contains(logs, "10.20.0.0/16") || strings.Contains(logs, "development") {
+		t.Fatalf("it should say which ranges are open, and not call itself a development setup:\n%s", logs)
+	}
+
+	// With the right range the receiver works, and the webhook arrives signed.
+	open := startStrict(t, filepath.Join(t.TempDir(), "c.db"), freeAddr(t), "-allow-cidr", "127.0.0.0/8")
+	code, app, ep := register(open)
+	if code != 201 {
+		t.Fatalf("the allowed range must be accepted: %d %v\n%s", code, ep, open.logs())
+	}
+	cust.secret.Store(s(ep, "secret"))
+	_, msg := open.call(t, "POST", "/v1/apps/"+s(app, "id")+"/messages", map[string]any{"event_type": "invoice.paid", "payload": map[string]any{"n": 1}})
+	waitFor(t, 10*time.Second, "the webhook to arrive through the allowed range", func() bool { return cust.received()[s(msg, "id")] == 1 })
+	if cust.badSigs.Load() != 0 {
+		t.Fatal("the receiver could not verify the signature")
+	}
+
+	// A name for this machine is refused at registration even though 127.0.0.1 is allowed, because the URL check does not
+	// resolve names. The operator writes the address. The dial check, which does see what a name resolves to, is tested in
+	// the ssrf package.
+	_, port, _ := net.SplitHostPort(strings.TrimPrefix(cust.srv.URL, "http://"))
+	if code, _ := open.call(t, "POST", "/v1/apps/"+s(app, "id")+"/endpoints", map[string]any{"url": "http://localhost:" + port + "/"}); code != 400 {
+		t.Fatalf("a name for this machine is still refused when registered: %d", code)
+	}
+}
+
+func TestARefusedRangeStopsTheProgramBeforeItListens(t *testing.T) {
+	cmd := exec.Command(binary, "serve", "-addr", freeAddr(t), "-db", filepath.Join(t.TempDir(), "x.db"), "-allow-cidr", "169.254.0.0/16")
+	cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "BOWLER_API_KEY=" + procKey}
+	out, err := cmd.CombinedOutput()
+	exit, ok := err.(*exec.ExitError)
+	if !ok || exit.ExitCode() != 2 || !strings.Contains(string(out), "169.254.169.254") {
+		t.Fatalf("it should exit with 2 and name the address it would have opened, got %v %q", err, out)
 	}
 }
