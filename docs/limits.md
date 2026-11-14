@@ -14,7 +14,7 @@ What this version does not do:
 
 - The operator's API key can do everything, and the audit log shows it only as `admin`, so people who share it cannot be told apart.
 - A full token has the whole authority of its app. A token can be read only or can expire, and there is nothing in between. When it was last used is recorded only to within ten minutes.
-- The audit entry is written after the action, not in the same transaction. A failed write is logged and counted in `bowler_audit_errors_total`, and the entry is missing.
+- A broken audit log stops the changes that are audited, because each one is refused when its entry cannot be written. Messages and deliveries do not depend on it. `bowler_audit_errors_total` counts the refusals.
 - Without `BOWLER_ENCRYPTION_KEY`, signing secrets are stored in the clear. With it, the key is in the running program's environment, so it protects a copy of the file and not a person on the machine, and if the key is lost the secrets are lost.
 - Payloads and the start of each receiver's reply are never encrypted. They are deleted after the retention period, but until then they are in the clear, so use an encrypted volume.
 - No TLS and no rate limit on the API itself. Put it behind a proxy. The per-endpoint rate limit protects receivers, not the API.
@@ -40,7 +40,7 @@ The threat model, [threat-model.md](threat-model.md), lists what is protected, f
 
 1. Postgres, and more than one node
 2. A retention period per app, and encrypting payloads
-3. Named operator credentials, and the audit entry in the same transaction as the change
+3. Named operator credentials
 4. A page for your customers to manage endpoints and read their delivery log, using tokens
 5. Wake the dispatcher exactly when a rate limit allows more, instead of on the next poll
 6. Asymmetric `v1a` signatures, and a per-endpoint allow list for private receivers

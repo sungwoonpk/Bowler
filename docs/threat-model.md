@@ -82,9 +82,10 @@ These are real gaps. Read them before relying on the service.
 - **A full token has the whole authority of its app.** It can read and rotate signing secrets and create endpoints, so it is for
   the app's own side. A token can be made read only (which also refuses reading a signing secret) and can be made to expire, and
   there is nothing between read and full. When it was last used is recorded only to within ten minutes.
-- **The audit entry is written after the action.** If writing it fails, the action has happened and the entry is missing. The
-  failure is logged and counted in `bowler_audit_errors_total`. Refused requests are not in the audit log, only in the request log.
-  An operator with access to the database file can still edit it, since it is not signed or sent anywhere else.
+- **A change and its audit entry are one transaction**, so there is no change without an entry. If the entry cannot be written
+  the change is refused and `bowler_audit_errors_total` counts it, so a broken log stops changes and is noticed. A signing secret
+  is not given out unless its read was recorded first. Refused requests are not in the audit log, only in the request log. An
+  operator with access to the database file can still edit it, since it is not signed or sent anywhere else.
 - **No TLS.** The API speaks plain HTTP. Run it behind a reverse proxy or load balancer that terminates TLS.
 - **No rate limit on the API** except on wrong keys. A caller with the key can send as fast as the machine allows. The
   per-endpoint rate limit protects the *receivers* from Bowler, not Bowler from its callers.
