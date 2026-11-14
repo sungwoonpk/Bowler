@@ -24,7 +24,7 @@ What this version does not do:
 **Behaviour**
 
 - An idempotency key stops protecting once its message is deleted by retention.
-- A rate limit allows a burst of one second's worth after a quiet time, and holds the rate on average, to within the 250 ms poll.
+- A rate limit allows a burst of one second's worth after a quiet time. It holds the rate on average (measured at 98% to 99% of the limit), and an attempt can start up to 250 ms late, so the spacing inside a second is uneven. [0007](decisions/0007-per-endpoint-rate-limit.md)
 - At least once, not exactly once, and no ordering guarantee.
 
 **Scale and scope**
@@ -42,5 +42,4 @@ The threat model, [threat-model.md](threat-model.md), lists what is protected, f
 2. A retention period per app, and encrypting payloads
 3. Named operator credentials
 4. A page for your customers to manage endpoints and read their delivery log, using tokens
-5. Wake the dispatcher exactly when a rate limit allows more, instead of on the next poll
-6. Asymmetric `v1a` signatures, and a per-endpoint allow list for private receivers
+5. Asymmetric `v1a` signatures, and a per-endpoint allow list for private receivers

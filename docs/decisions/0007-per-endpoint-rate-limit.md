@@ -29,9 +29,29 @@ flooded by a burst of events, or by `recover` replaying a long outage. 0005 list
 - **A burst of one second's worth is allowed after a quiet time.** A receiver that cannot take 10 requests at the same
   instant should use a concurrency of 1 together with the rate. The allowance is in the documentation, so it is not a
   surprise.
-- **Timing is as fine as the poll.** A limit of 1 per second is kept on average, and individual attempts can start up to
-  250 ms after the moment they became allowed. Waking the dispatcher exactly when an allowance returns would be more
-  precise and is not built.
+- **Timing is as fine as the poll.** Individual attempts can start up to 250 ms after the moment they became allowed, so
+  for a rate such as 3 or 7 per second the starts come in uneven steps (gaps of 500, 250 and 250 ms where 333 was meant).
+  The average is not affected. Waking the dispatcher exactly when an allowance returns was considered and **not built**,
+  after measuring (below).
+
+## Measured: exact wake-ups are not worth building
+
+With the production poll interval (250 ms) and a backlog waiting, the time from the first attempt to the last of
+`rate + 4 × rate` attempts, against the ideal of four seconds after the opening burst:
+
+| Limit | Attempts | Last start after the first | Rate reached |
+| ----- | -------- | -------------------------- | ------------ |
+| 3 / s | 15       | 4.05 s                     | 99% of the limit |
+| 7 / s | 35       | 4.07 s                     | 98% of the limit |
+| 20 / s | 100     | 4.08 s                     | 98% of the limit |
+
+A short run at a limit of 1 to 10 per second (five attempts after the burst) gave 98% to 99% as well. The average holds
+because the allowance may run ahead of the clock by one second: a poll that is late finds more room and takes more, so the
+lateness is made up, not lost. What the 250 ms poll costs is the *spacing* of attempts inside a second, which the burst
+allowance already makes uneven by design. A timer that wakes the dispatcher at the exact moment would even out the spacing
+and add a second source of wake-ups to the dispatcher loop, which has to be kept correct. That is not worth it for a webhook
+receiver. If someone needs smooth spacing, the poll interval is a setting. The measurement is a one-off with a throwaway
+test, not part of the suite, because a timing test of several seconds would fail on a slow CI runner.
 - **The interval is a whole number of milliseconds**, so a rate that does not divide 1000 (for example 3) is slightly
   fast, about 0.1%.
 - The limit is per endpoint and says nothing about the app as a whole. An app with many endpoints is limited by the sum.
