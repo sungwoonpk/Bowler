@@ -32,7 +32,7 @@ someone deciding whether to trust the service, so the gaps are listed as plainly
 
 | Threat                                                      | Defense                                                                                                                                         | Checked by                          |
 | ----------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------- |
-| A URL aimed at private or metadata addresses (SSRF)         | https only, and no private, loopback, link-local, CGNAT or reserved ranges, checked when registered and again on the address actually dialled   | `ssrf`, `deliver`, `api` tests      |
+| A URL aimed at private or metadata addresses (SSRF)         | https only, and no private, loopback, link-local, CGNAT or reserved ranges, checked when registered and again on the address actually dialled. The operator may open named private ranges, never a metadata address | `ssrf`, `deliver`, `api`, `cmd` tests |
 | A name that resolves to a public address, then a private one | The check runs on the resolved address at connection time, so a later answer from DNS is checked too                                           | `ssrf` tests (a real dial)          |
 | A receiver that answers `302` to an internal address        | Redirects are never followed, they count as a failed attempt                                                                                    | `deliver` tests                     |
 | A proxy in the environment hiding the real destination      | The HTTP client ignores `HTTP_PROXY` and friends                                                                                                | `deliver` tests                     |
@@ -89,8 +89,10 @@ These are real gaps. Read them before relying on the service.
 - **No TLS.** The API speaks plain HTTP. Run it behind a reverse proxy or load balancer that terminates TLS.
 - **No rate limit on the API** except on wrong keys. A caller with the key can send as fast as the machine allows. The
   per-endpoint rate limit protects the *receivers* from Bowler, not Bowler from its callers.
-- **Receivers on a private network cannot be reached** unless the global development flag is turned on, which also removes the SSRF
-  protection for everyone. A per-endpoint allow list is not built yet.
+- **Receivers on a private network cannot be reached** unless the operator names their range with `--allow-cidr`, which lets
+  every customer reach that range, or turns on the global development flag, which removes the SSRF protection altogether. The
+  list is the operator's, not an endpoint's, and cannot include a cloud metadata address. A list per endpoint is not built, see
+  [0012](decisions/0012-operator-allow-list-for-private-receivers.md).
 - **One node.** There is no replication. If the disk is lost, the data is lost, so back the file up.
 - **At-least-once means repeats are possible.** A receiver that does not ignore a `webhook-id` it has seen can process an event twice.
 - **Delivery order is not guaranteed.**

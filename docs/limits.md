@@ -4,7 +4,7 @@
 | -------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
 | A message that got `202` is not lost, even if the process is killed                                            | Exactly once. A crash or a slow answer can cause a repeat, so receivers must ignore a `webhook-id` they know |
 | Every attempt is recorded, with its status, duration and failure reason                                        | A particular order. A retry can be overtaken by a newer message                                              |
-| One endpoint cannot use more than its concurrency of the workers, or start attempts faster than its rate limit | That a receiver is reachable. A receiver on a private network needs the development flag                     |
+| One endpoint cannot use more than its concurrency of the workers, or start attempts faster than its rate limit | That a receiver is reachable. A receiver on a private network needs its range allowed with `--allow-cidr`    |
 | Secrets, tokens and API keys are never written to the log or the audit log                                     | Encryption of payloads. Only signing secrets are encrypted, and only if you set a key                        |
 | Finished data is deleted after the retention period                                                            | That the file gets smaller. Deleted space is reused, and shrinking the file needs a `VACUUM`                 |
 
@@ -18,7 +18,7 @@ What this version does not do:
 - Without `BOWLER_ENCRYPTION_KEY`, signing secrets are stored in the clear. With it, the key is in the running program's environment, so it protects a copy of the file and not a person on the machine, and if the key is lost the secrets are lost.
 - Payloads and the start of each receiver's reply are never encrypted. They are deleted after the retention period, but until then they are in the clear, so use an encrypted volume.
 - No TLS and no rate limit on the API itself. Put it behind a proxy. The per-endpoint rate limit protects receivers, not the API.
-- A receiver on a private network cannot be reached without the global development flag, which removes the SSRF protection. There is no per-endpoint allow list yet.
+- A receiver on a private network cannot be reached until the operator allows its range with `--allow-cidr`, and the range is then open to every customer. There is no list per endpoint, because a customer could widen it and a reused connection could carry one endpoint's permission to another. [0012](decisions/0012-operator-allow-list-for-private-receivers.md)
 - HMAC signatures only. The specification's asymmetric `v1a` scheme is not implemented.
 
 **Behaviour**
@@ -42,4 +42,4 @@ The threat model, [threat-model.md](threat-model.md), lists what is protected, f
 2. A retention period per app, and encrypting payloads
 3. Named operator credentials
 4. A page for your customers to manage endpoints and read their delivery log, using tokens
-5. Asymmetric `v1a` signatures, and a per-endpoint allow list for private receivers
+5. Asymmetric `v1a` signatures
