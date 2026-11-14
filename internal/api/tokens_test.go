@@ -1,15 +1,12 @@
 package api
 
 import (
-	"context"
-	"errors"
+	"database/sql"
 	"fmt"
 	"net/http"
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/sungwoonpk/bowler/internal/domain"
 )
 
 func bearer(tok string) []string { return []string{"Authorization", "Bearer " + tok} }
@@ -310,18 +307,106 @@ func TestAuditLogReadingIsScopedAndFilterable(t *testing.T) {
 	}
 }
 
-func TestAFailureToRecordAnAuditEntryDoesNotFailTheRequestButIsCounted(t *testing.T) {
+// breakAuditLog makes every write to the audit log fail, through a second connection to the same file, the way a full
+// disk or a broken table would.
+func (h *harness) breakAuditLog() {
+	h.t.Helper()
+	db, err := sql.Open("sqlite", "file:"+h.dbPath+"?_pragma=busy_timeout(5000)")
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`CREATE TRIGGER audit_down BEFORE INSERT ON audit_log BEGIN SELECT RAISE(ABORT, 'audit log unavailable'); END`); err != nil {
+		h.t.Fatal(err)
+	}
+}
+
+func TestAChangeIsRefusedAndCountedWhenItsAuditEntryCannotBeWritten(t *testing.T) {
 	h := newHarness(t, func(s *setup) { s.noWorker = true })
 	a := h.app("a")
-	h.api.recordAudit = func(context.Context, domain.AuditEntry, time.Time) (domain.AuditEntry, error) {
-		return domain.AuditEntry{}, errors.New("disk full")
-	}
+	h.breakAuditLog()
 	rc := newReceiver(t)
-	if r := h.do("POST", "/v1/apps/"+a+"/endpoints", map[string]any{"url": rc.srv.URL}); r.status != 201 {
-		t.Fatalf("the action happened, so the caller is told so: %d %s", r.status, r.raw)
+	r := h.do("POST", "/v1/apps/"+a+"/endpoints", map[string]any{"url": rc.srv.URL})
+	if r.status != 500 || !strings.Contains(string(r.raw), "audit log") || strings.Contains(string(r.raw), "audit log unavailable") {
+		t.Fatalf("the caller is told the change was not made, without the database's words: %d %s", r.status, r.raw)
+	}
+	if got := h.do("GET", "/v1/apps/"+a+"/endpoints", nil); len(got.body["data"].([]any)) != 0 {
+		t.Fatalf("the endpoint exists although the request failed: %s", got.raw)
 	}
 	if text := string(h.do("GET", "/metrics", nil).raw); !strings.Contains(text, "bowler_audit_errors_total 1") {
-		t.Fatalf("a gap in the record must show in the metrics:\n%s", text)
+		t.Fatalf("a broken audit log must show in the metrics:\n%s", text)
+	}
+}
+
+func TestEveryAuditedRouteRefusesWhenTheAuditLogIsBroken(t *testing.T) {
+	h := newHarness(t, func(s *setup) { s.noWorker = true })
+	a := h.app("a")
+	rc := newReceiver(t)
+	ep, _ := h.endpoint(a, rc.srv.URL, nil)
+	_, tok := h.token(a, "portal")
+	base := "/v1/apps/" + a + "/endpoints/" + ep
+	h.breakAuditLog()
+	for _, c := range []struct{ name, method, path string }{
+		{"create an app", "POST", "/v1/apps"},
+		{"create an endpoint", "POST", "/v1/apps/" + a + "/endpoints"},
+		{"update an endpoint", "PATCH", base},
+		{"delete an endpoint", "DELETE", base},
+		{"read a secret", "GET", base + "/secret"},
+		{"rotate a secret", "POST", base + "/secret/rotate"},
+		{"recover an endpoint", "POST", base + "/recover"},
+		{"create a token", "POST", "/v1/apps/" + a + "/tokens"},
+		{"revoke a token", "DELETE", "/v1/apps/" + a + "/tokens/" + tok},
+	} {
+		var body any
+		switch c.name {
+		case "create an app":
+			body = map[string]any{"name": "b"}
+		case "create an endpoint":
+			body = map[string]any{"url": rc.srv.URL}
+		case "update an endpoint":
+			body = map[string]any{"description": "x"}
+		case "create a token":
+			body = map[string]any{"name": "second"}
+		}
+		if r := h.do(c.method, c.path, body); r.status != 500 {
+			t.Errorf("%s: want 500, got %d %s", c.name, r.status, r.raw)
+		}
+	}
+	// The endpoint and the token are as they were.
+	if got := h.do("GET", "/v1/apps/"+a+"/endpoints", nil); len(got.body["data"].([]any)) != 1 {
+		t.Fatalf("the delete went through: %s", got.raw)
+	}
+	if tk := h.do("GET", "/v1/apps/"+a+"/tokens", nil); tk.status != 200 || strings.Contains(string(tk.raw), "revoked_at") {
+		t.Fatalf("the revoke went through: %d %s", tk.status, tk.raw)
+	}
+}
+
+func TestASecretIsNotGivenOutWhenItsReadCannotBeRecorded(t *testing.T) {
+	h := newHarness(t, func(s *setup) { s.noWorker = true })
+	a := h.app("a")
+	rc := newReceiver(t)
+	ep, secret := h.endpoint(a, rc.srv.URL, nil)
+	h.breakAuditLog()
+	r := h.do("GET", "/v1/apps/"+a+"/endpoints/"+ep+"/secret", nil)
+	if r.status != 500 || strings.Contains(string(r.raw), secret) {
+		t.Fatalf("no record, no secret: %d %s", r.status, r.raw)
+	}
+}
+
+func TestReadsAndMessagesStillWorkWhenTheAuditLogIsBroken(t *testing.T) {
+	h := newHarness(t, func(s *setup) { s.noWorker = true })
+	a := h.app("a")
+	rc := newReceiver(t)
+	h.endpoint(a, rc.srv.URL, nil)
+	h.breakAuditLog()
+	if r := h.send(a, "x.y", map[string]any{"n": 1}); r.status != 202 {
+		t.Fatalf("sending a message is not audited and must not stop: %d %s", r.status, r.raw)
+	}
+	if r := h.do("GET", "/v1/apps/"+a+"/endpoints", nil); r.status != 200 {
+		t.Fatalf("a list: %d", r.status)
+	}
+	if r := h.do("GET", "/healthz", nil); r.status != 200 {
+		t.Fatalf("health: %d", r.status)
 	}
 }
 

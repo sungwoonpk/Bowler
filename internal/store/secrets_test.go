@@ -87,7 +87,7 @@ func TestRotatingSealsBothTheNewAndThePreviousSecret(t *testing.T) {
 	s := openAt(t, filepath.Join(t.TempDir(), "b.db"), boxOf(t, 1))
 	app, _ := s.CreateApp(ctx(), "acme", nil, t0)
 	e := addEndpoint(t, s, app.ID, "whsec_OLDMARKER")
-	rot, err := s.RotateSecret(ctx(), app.ID, e.ID, "whsec_NEWMARKER", t0.Add(time.Hour))
+	rot, err := s.RotateSecret(ctx(), app.ID, e.ID, "whsec_NEWMARKER", t0.Add(time.Hour), t0)
 	if err != nil || rot.Secret != "whsec_NEWMARKER" || rot.PrevSecret != "whsec_OLDMARKER" {
 		t.Fatalf("%+v %v", rot, err)
 	}
@@ -110,7 +110,7 @@ func TestADatabaseFromBeforeEncryptionIsSealedOnStartAndNoPlainTextStaysInTheFil
 		e := addEndpoint(t, plain, app.ID, "whsec_LEGACYMARKER"+string(rune('A'+i)))
 		ids = append(ids, e.ID)
 	}
-	plain.RotateSecret(ctx(), app.ID, ids[0], "whsec_ROTATEDMARKER", t0.Add(time.Hour))
+	plain.RotateSecret(ctx(), app.ID, ids[0], "whsec_ROTATEDMARKER", t0.Add(time.Hour), t0)
 	plain.Close()
 
 	s := openAt(t, path, boxOf(t, 1))

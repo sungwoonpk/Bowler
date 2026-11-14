@@ -60,9 +60,13 @@ func (s *Server) createToken(w http.ResponseWriter, r *http.Request) error {
 		expires = &t
 	}
 	tok := token.New()
+	detail := map[string]any{"name": name, "scope": scope}
+	if expires != nil {
+		detail["expires_at"] = expires.UTC().Format(time.RFC3339)
+	}
 	made, err := s.store.CreateAppToken(r.Context(), store.NewAppToken{
 		AppID: app.ID, Name: name, Hash: tok.Hash, Prefix: tok.Short, Scope: scope, ExpiresAt: expires,
-	}, s.now())
+	}, s.now(), store.Audited(s.auditEntry(w, r, app.ID, "token.create", "token", "", detail)))
 	if errors.Is(err, store.ErrTooManyTokens) {
 		return newError(http.StatusConflict, "too_many_tokens",
 			"this app already has "+strconv.Itoa(store.MaxActiveTokensPerApp)+" working tokens, revoke one first")
@@ -70,11 +74,6 @@ func (s *Server) createToken(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
-	detail := map[string]any{"name": made.Name, "scope": made.Scope}
-	if made.ExpiresAt != nil {
-		detail["expires_at"] = made.ExpiresAt.UTC().Format(time.RFC3339)
-	}
-	s.audit(w, r, app.ID, "token.create", "token", made.ID, detail)
 	writeJSON(w, http.StatusCreated, tokenWithSecret{AppToken: made, Token: tok.Secret})
 	return nil
 }
@@ -106,16 +105,17 @@ func (s *Server) revokeToken(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
+	// The name is looked up first because it goes in the audit entry. A name never changes, so this cannot go stale.
 	before, err := s.store.GetAppToken(r.Context(), app.ID, tID)
 	if err != nil {
 		return err
 	}
-	revoked, err := s.store.RevokeAppToken(r.Context(), app.ID, tID, s.now())
+	// The store writes the entry only when this call is the one that revokes, so asking twice, or two callers at once,
+	// leave one entry.
+	revoked, err := s.store.RevokeAppToken(r.Context(), app.ID, tID, s.now(),
+		store.Audited(s.auditEntry(w, r, app.ID, "token.revoke", "token", tID, map[string]any{"name": before.Name})))
 	if err != nil {
 		return err
-	}
-	if !before.Revoked() {
-		s.audit(w, r, app.ID, "token.revoke", "token", revoked.ID, map[string]any{"name": revoked.Name})
 	}
 	writeJSON(w, http.StatusOK, revoked)
 	return nil

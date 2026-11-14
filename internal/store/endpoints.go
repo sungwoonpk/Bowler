@@ -78,7 +78,7 @@ type NewEndpoint struct {
 }
 
 // CreateEndpoint adds an endpoint to an app.
-func (s *Store) CreateEndpoint(ctx context.Context, n NewEndpoint, now time.Time) (domain.Endpoint, error) {
+func (s *Store) CreateEndpoint(ctx context.Context, n NewEndpoint, now time.Time, opts ...WriteOption) (domain.Endpoint, error) {
 	types, err := encodeEventTypes(n.EventTypes)
 	if err != nil {
 		return domain.Endpoint{}, err
@@ -94,10 +94,15 @@ func (s *Store) CreateEndpoint(ctx context.Context, n NewEndpoint, now time.Time
 	if err != nil {
 		return domain.Endpoint{}, err
 	}
-	_, err = s.db.ExecContext(ctx,
-		`INSERT INTO endpoints (id, app_id, url, description, secret, event_types, concurrency, rate_per_second, created_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		e.ID, e.AppID, e.URL, e.Description, sealed, types, e.Concurrency, e.RatePerSecond, ms(e.CreatedAt))
+	err = s.withTx(ctx, func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO endpoints (id, app_id, url, description, secret, event_types, concurrency, rate_per_second, created_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			e.ID, e.AppID, e.URL, e.Description, sealed, types, e.Concurrency, e.RatePerSecond, ms(e.CreatedAt)); err != nil {
+			return err
+		}
+		return optsOf(opts).record(ctx, tx, now, about(e.AppID, e.ID, nil))
+	})
 	return e, err
 }
 
@@ -165,7 +170,7 @@ type EndpointUpdate struct {
 }
 
 // UpdateEndpoint changes an endpoint and returns it.
-func (s *Store) UpdateEndpoint(ctx context.Context, appID, endpointID string, u EndpointUpdate, now time.Time) (domain.Endpoint, error) {
+func (s *Store) UpdateEndpoint(ctx context.Context, appID, endpointID string, u EndpointUpdate, now time.Time, opts ...WriteOption) (domain.Endpoint, error) {
 	var out domain.Endpoint
 	err := s.withTx(ctx, func(tx *sql.Tx) error {
 		e, err := s.scanEndpoint(tx.QueryRowContext(ctx,
@@ -212,15 +217,18 @@ func (s *Store) UpdateEndpoint(ctx context.Context, appID, endpointID string, u 
 			`UPDATE endpoints SET url = ?, description = ?, event_types = ?, concurrency = ?, rate_per_second = ?, disabled_at = ?, disabled_reason = ?
 			 WHERE id = ?`,
 			e.URL, e.Description, types, e.Concurrency, e.RatePerSecond, nullMS(e.DisabledAt), reason, e.ID)
+		if err != nil {
+			return err
+		}
 		out = e
-		return err
+		return optsOf(opts).record(ctx, tx, now, about(appID, endpointID, nil))
 	})
 	return out, err
 }
 
 // DeleteEndpoint removes an endpoint from view and cancels the deliveries still waiting to go to it. Finished
 // deliveries and their attempts are kept so history stays readable.
-func (s *Store) DeleteEndpoint(ctx context.Context, appID, endpointID string, now time.Time) error {
+func (s *Store) DeleteEndpoint(ctx context.Context, appID, endpointID string, now time.Time, opts ...WriteOption) error {
 	return s.withTx(ctx, func(tx *sql.Tx) error {
 		res, err := tx.ExecContext(ctx, "UPDATE endpoints SET deleted_at = ? WHERE id = ? AND app_id = ? AND deleted_at IS NULL", ms(now), endpointID, appID)
 		if err != nil {
@@ -232,13 +240,16 @@ func (s *Store) DeleteEndpoint(ctx context.Context, appID, endpointID string, no
 		_, err = tx.ExecContext(ctx,
 			`UPDATE deliveries SET state = 'cancelled', finished_at = ?, lease_until = NULL, lease_owner = NULL
 			 WHERE endpoint_id = ? AND state IN ('pending', 'inflight')`, ms(now), endpointID)
-		return err
+		if err != nil {
+			return err
+		}
+		return optsOf(opts).record(ctx, tx, now, about(appID, endpointID, nil))
 	})
 }
 
 // RotateSecret makes newSecret the signing secret. The old one keeps signing until graceUntil, so receivers have
 // time to switch.
-func (s *Store) RotateSecret(ctx context.Context, appID, endpointID, newSecret string, graceUntil time.Time) (domain.Endpoint, error) {
+func (s *Store) RotateSecret(ctx context.Context, appID, endpointID, newSecret string, graceUntil, now time.Time, opts ...WriteOption) (domain.Endpoint, error) {
 	var out domain.Endpoint
 	err := s.withTx(ctx, func(tx *sql.Tx) error {
 		e, err := s.scanEndpoint(tx.QueryRowContext(ctx,
@@ -259,11 +270,14 @@ func (s *Store) RotateSecret(ctx context.Context, appID, endpointID, newSecret s
 		}
 		_, err = tx.ExecContext(ctx, "UPDATE endpoints SET secret = ?, prev_secret = ?, prev_secret_expires_at = ? WHERE id = ?",
 			sealedNew, sealedOld, ms(graceUntil), e.ID)
+		if err != nil {
+			return err
+		}
 		e.PrevSecret, e.Secret = e.Secret, newSecret
 		g := graceUntil.UTC()
 		e.PrevSecretExpiresAt = &g
 		out = e
-		return err
+		return optsOf(opts).record(ctx, tx, now, about(appID, endpointID, nil))
 	})
 	return out, err
 }
